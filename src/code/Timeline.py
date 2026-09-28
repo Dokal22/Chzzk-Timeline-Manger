@@ -553,22 +553,6 @@ def transcribe_chzzk_audio(audio_path, target_path, model_size="base"):
     print(f"✅ 원본 오프셋 전체 생대본 보관 완료! (보존 경로: {target_path})")
     return raw_script
 
-def parse_streamer_info_name(streamer_info_path) -> str:
-    if not os.path.exists(streamer_info_path):
-        return ""
-    try:
-        with open(streamer_info_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line_strip = line.strip()
-                if not line_strip or line_strip.startswith("#"):
-                    continue
-                if ":" in line_strip:
-                    return line_strip.split(":")[1].strip()
-                return line_strip
-    except:
-        pass
-    return ""
-
 def load_chzzk_streamers_raw_db(filename="chzzk_streamers.txt") -> str:
     db_path = os.path.join(os.getcwd(), filename)
     if not os.path.exists(db_path):
@@ -644,6 +628,7 @@ def generate_chzzk_timeline(
     codex_model="",
     chunk_index=0,
     use_collab_member_reference=True,
+    target_streamer="",
 ):
     chzzk_url = sanitize_chzzk_url(chzzk_url)
 
@@ -651,7 +636,6 @@ def generate_chzzk_timeline(
     streamer_info_path = os.path.join(os.getcwd(), "streamer_info.txt")
     streamers_db_path = "chzzk_streamers.txt"
 
-    target_streamer = parse_streamer_info_name(streamer_info_path)
     verified_collab_members = []
     if use_collab_member_reference:
         verified_collab_members = load_and_filter_streamers_db(

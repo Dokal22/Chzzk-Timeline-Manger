@@ -181,7 +181,7 @@ def select_chzzk_vod(channel_id, limit=10):
     vod_list = get_chzzk_vod_list(channel_id, limit=limit)
     if not vod_list:
         print("❌ 유효한 VOD가 없거나 채널 ID가 잘못되었습니다.")
-        return None, None, 0
+        return None, None, 0, ""
         
     print("\n" + "="*75)
     print(f"🎬 최근 VOD 리스트 (총 {len(vod_list)}개 발견)")
@@ -204,8 +204,10 @@ def select_chzzk_vod(channel_id, limit=10):
                 video_no = selected_video.get("videoNo")
                 video_title = selected_video.get("videoTitle", "방송다시보기")
                 video_duration = selected_video.get("duration", 0)
+                channel = selected_video.get("channel") or {}
+                channel_name = selected_video.get("channelName") or channel.get("channelName") or ""
                 print(f"\n🎯 [선택 완료] '{video_title}' 분석을 진행합니다.")
-                return str(video_no), video_title, video_duration
+                return str(video_no), video_title, video_duration, channel_name
             
             print(f"❌ 1에서 {len(vod_list)} 사이의 숫자를 입력해주세요.")
         except ValueError:
