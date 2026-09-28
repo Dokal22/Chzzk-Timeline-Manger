@@ -100,10 +100,15 @@ def run_pure_test():
         print("❌ 올바른 숫자가 아닙니다. 기본값인 10개로 탐색을 시작합니다.")
         vod_limit = 10
 
-    vod_id, actual_title, video_duration = select_chzzk_vod(TARGET_CHANNEL_ID, limit=vod_limit)
+    vod_id, actual_title, video_duration, target_streamer = select_chzzk_vod(
+        TARGET_CHANNEL_ID,
+        limit=vod_limit,
+    )
     if not vod_id:
         print("❌ 유효한 치지직 VOD 일련번호를 획득하지 못했습니다.")
         return
+    if not target_streamer:
+        print("⚠️ 선택한 VOD에서 채널명을 확인하지 못해 주인공 스트리머명을 비워 둡니다.")
 
     full_vod_url = f"https://chzzk.naver.com/video/{vod_id}"
     print(f"\n🎬 선택된 타겟 방송: [{actual_title}] (VOD ID: {vod_id})")
@@ -181,7 +186,8 @@ def run_pure_test():
             actual_title=actual_title,
             chzzk_url=full_vod_url,
             codex_model=CODEX_MODEL,
-            chunk_index=chunk_index
+            chunk_index=chunk_index,
+            target_streamer=target_streamer,
         )
 
         if chunk_items:
