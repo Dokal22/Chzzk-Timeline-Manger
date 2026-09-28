@@ -72,7 +72,45 @@ def process_direct_comment_mode():
         print(f"초안 파일을 직접 열어 수정해 주세요: {os.path.abspath(selected_file)}")
 
 
-def run_pure_test():
+def load_prepared_timeline_materials(vod_id):
+    full_script_path = os.path.join(
+        os.getcwd(), "voicepalette", f"VOD_{vod_id}", "full_raw_script.txt"
+    )
+    full_chat_path = os.path.join(
+        os.getcwd(), "chat_cache", str(vod_id), f"chat_{vod_id}_full.txt"
+    )
+
+    missing_materials = []
+    if not os.path.isfile(full_script_path) or os.path.getsize(full_script_path) <= 10:
+        missing_materials.append(f"STT 대본: {full_script_path}")
+    if not os.path.isfile(full_chat_path) or os.path.getsize(full_chat_path) <= 0:
+        missing_materials.append(f"채팅 캐시: {full_chat_path}")
+
+    if missing_materials:
+        print("❌ 타임라인만 다시 만들기 위한 재료가 부족합니다.")
+        for material in missing_materials:
+            print(f"   - {material}")
+        print("💡 먼저 일반 생성 모드를 한 번 실행해 STT 대본과 채팅 캐시를 준비해 주세요.")
+        return ""
+
+    try:
+        with open(full_script_path, "r", encoding="utf-8") as f:
+            full_transcription = f.read()
+    except (OSError, UnicodeError) as e:
+        print(f"❌ 준비된 STT 대본을 읽지 못했습니다: {e}")
+        return ""
+
+    if not full_transcription.strip():
+        print("❌ 준비된 STT 대본이 비어 있습니다.")
+        return ""
+
+    print("✨ [재료 재사용] 오디오 다운로드와 STT 변환을 건너뜁니다.")
+    print(f"   - STT 대본: {full_script_path}")
+    print(f"   - 채팅 캐시: {full_chat_path}")
+    return full_transcription
+
+
+def run_pure_test(timeline_only=False):
     print("\n-------------------------------------------------------------------------")
     print("🤖 AI 기반 새 VOD 타임라인 생성 및 추출 모드 시작")
     print("-------------------------------------------------------------------------")
@@ -123,17 +161,20 @@ def run_pure_test():
     print(f"⏱️ 영상 총 환산 시간: 약 {total_duration_secs}초")
     print(f"🎯 전체 분석 타겟 구간: {global_start_sec}초 ~ {global_end_sec}초 범위")
 
-    master_audio_path = download_chzzk_vod_audio(chzzk_url=full_vod_url, vod_id=vod_id)
-    if not master_audio_path or not os.path.exists(master_audio_path):
-        print("❌ 전체 오디오 캐시 데이터 생성 과정에 실패했습니다.")
-        return
+    if timeline_only:
+        full_transcription = load_prepared_timeline_materials(vod_id)
+    else:
+        master_audio_path = download_chzzk_vod_audio(chzzk_url=full_vod_url, vod_id=vod_id)
+        if not master_audio_path or not os.path.exists(master_audio_path):
+            print("❌ 전체 오디오 캐시 데이터 생성 과정에 실패했습니다.")
+            return
 
-    full_script_path = os.path.join(os.getcwd(), "voicepalette", f"VOD_{vod_id}", "full_raw_script.txt")
-    full_transcription = transcribe_chzzk_audio(
-        audio_path=master_audio_path,
-        target_path=full_script_path,
-        model_size=WHISPER_MODEL
-    )
+        full_script_path = os.path.join(os.getcwd(), "voicepalette", f"VOD_{vod_id}", "full_raw_script.txt")
+        full_transcription = transcribe_chzzk_audio(
+            audio_path=master_audio_path,
+            target_path=full_script_path,
+            model_size=WHISPER_MODEL
+        )
     if not full_transcription.strip():
         print("❌ VOD 전체 대본(STT) 데이터가 유효하지 않거나 비어있습니다.")
         return
@@ -259,15 +300,18 @@ if __name__ == "__main__":
     print("=========================================================================")
     print("                  치지직 VOD 타임라인 매니저                 ")
     print("=========================================================================")
-    print(" [1] AI 연산 실행하여 새 타임라인 파일 생성하기")
-    print(" [2] 기존 타임라인 초안을 열어 수정하기")
+    print(" [1] 새 재료를 준비하고 타임라인 파일 생성하기")
+    print(" [2] 준비된 재료로 타임라인만 다시 만들기")
+    print(" [3] 기존 타임라인 초안을 열어 수정하기")
     print("-------------------------------------------------------------------------")
 
-    menu = input("👉 원하시는 모드 번호를 선택하세요 (1 또는 2): ").strip()
+    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2 또는 3): ").strip()
 
     if menu == "1":
         run_pure_test()
     elif menu == "2":
+        run_pure_test(timeline_only=True)
+    elif menu == "3":
         process_direct_comment_mode()
     else:
         print("❌ 올바른 선택이 아닙니다. 프로그램을 종료합니다.")
