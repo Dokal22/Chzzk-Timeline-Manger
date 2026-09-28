@@ -24,6 +24,7 @@ def load_main_module():
         "timestamp_to_seconds",
         "correct_streamer_nicknames_with_codex",
         "ensure_codex_ready",
+        "load_chzzk_streamers_raw_db",
     ):
         setattr(timeline, name, lambda *args, **kwargs: None)
 
