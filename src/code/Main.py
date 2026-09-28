@@ -18,6 +18,8 @@ from Timeline import (
     download_chzzk_vod_audio,
     transcribe_chzzk_audio,
     generate_chzzk_timeline,
+    load_reference_context,
+    prepare_streamer_profile,
     merge_and_format_final_timeline,
     timestamp_to_seconds,
     correct_streamer_nicknames_with_codex,
@@ -236,7 +238,7 @@ def run_pure_test(timeline_only=False):
         print("❌ 올바른 숫자가 아닙니다. 기본값인 10개로 탐색을 시작합니다.")
         vod_limit = 10
 
-    vod_id, actual_title, video_duration, target_streamer = select_chzzk_vod(
+    vod_id, actual_title, video_duration, target_streamer, target_channel_id = select_chzzk_vod(
         TARGET_CHANNEL_ID,
         limit=vod_limit,
     )
@@ -245,6 +247,12 @@ def run_pure_test(timeline_only=False):
         return
     if not target_streamer:
         print("⚠️ 선택한 VOD에서 채널명을 확인하지 못해 주인공 스트리머명을 비워 둡니다.")
+
+    target_streamer, streamer_profile_context = prepare_streamer_profile(
+        target_channel_id=target_channel_id,
+        target_streamer=target_streamer,
+        legacy_path=os.path.join(os.getcwd(), "streamer_info.txt"),
+    )
 
     full_vod_url = f"https://chzzk.naver.com/video/{vod_id}"
     print(f"\n🎬 선택된 타겟 방송: [{actual_title}] (VOD ID: {vod_id})")
@@ -295,6 +303,23 @@ def run_pure_test(timeline_only=False):
         print("❌ VOD 전체 대본(STT) 데이터가 유효하지 않거나 비어있습니다.")
         return
 
+    reference_enabled = CONFIG.get("REFERENCE_ENABLED", False)
+    if isinstance(reference_enabled, str):
+        reference_enabled = reference_enabled.strip().lower() in {"1", "true", "yes", "y", "on"}
+    reference_urls = CONFIG.get("REFERENCE_URLS", [])
+    if isinstance(reference_urls, str):
+        reference_urls = [item.strip() for item in reference_urls.splitlines() if item.strip()]
+    if not isinstance(reference_urls, list):
+        reference_urls = []
+    reference_context = load_reference_context(
+        enabled=bool(reference_enabled),
+        reference_dir=CONFIG.get("REFERENCE_DIR", "references"),
+        reference_urls=reference_urls,
+        cache_mode="choose",
+        cache_dir=CONFIG.get("REFERENCE_CACHE_DIR", "reference_cache"),
+    )
+    if reference_context:
+        print("📚 선택형 참고자료를 1회 로드하여 모든 분석 청크에 적용합니다.")
     script_lines = full_transcription.split("\n")
     CHUNK_SIZE_SECS = 3600
     all_raw_items = []
@@ -340,7 +365,10 @@ def run_pure_test(timeline_only=False):
             codex_model=CODEX_MODEL,
             chunk_index=chunk_index,
             use_collab_member_reference=use_collab_member_reference,
+            reference_context=reference_context,
             target_streamer=target_streamer,
+            target_channel_id=target_channel_id,
+            streamer_profile_context=streamer_profile_context,
         )
 
         if chunk_items:

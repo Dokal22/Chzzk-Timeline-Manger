@@ -1,4 +1,7 @@
 # Generated VOD materials and timeline outputs
+reference_cache/
+streamer_profiles/
+config.json
 chat_cache/
 voicepalette/
 src/weights/
