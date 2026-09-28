@@ -274,7 +274,9 @@ def get_video_duration(chzzk_url):
         return 0
 
 
-def _download_chzzk_api_audio(chzzk_url, vod_id, output_path, ffmpeg_bin):
+def _download_chzzk_api_audio(
+    chzzk_url, vod_id, output_path, ffmpeg_bin, start_sec=0, end_sec=None
+):
     video_info = _get_chzzk_video_info(str(vod_id))
     video_id = video_info.get("videoId")
     in_key = video_info.get("inKey")
@@ -307,16 +309,21 @@ def _download_chzzk_api_audio(chzzk_url, vod_id, output_path, ffmpeg_bin):
     if not base_url:
         raise RuntimeError("CHZZK 오디오 스트림 URL이 없습니다.")
 
-    command = [
-        ffmpeg_bin, "-y", "-i", base_url,
-        "-vn", "-c:a", "copy", "-f", "mpegts", output_path,
-    ]
+    command = [ffmpeg_bin, "-y"]
+    if start_sec > 0:
+        command.extend(["-ss", str(start_sec)])
+    command.extend(["-i", base_url])
+    if end_sec is not None:
+        command.extend(["-t", str(end_sec - start_sec)])
+    command.extend(["-vn", "-c:a", "copy", "-f", "mpegts", output_path])
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if result.returncode != 0 or not os.path.exists(output_path):
         raise RuntimeError(f"CHZZK API 오디오 다운로드 실패: {result.stderr[-500:]}")
 
 
-def _download_chzzk_cli_video(chzzk_url, vod_dir, ffmpeg_bin, output_path):
+def _download_chzzk_cli_video(
+    chzzk_url, vod_dir, ffmpeg_bin, output_path, start_sec=0, end_sec=None
+):
     if not os.path.exists(CHZZK_DOWNLOADER_PATH):
         raise FileNotFoundError(f"CHZZK downloader가 없습니다: {CHZZK_DOWNLOADER_PATH}")
 
@@ -341,16 +348,21 @@ def _download_chzzk_cli_video(chzzk_url, vod_dir, ffmpeg_bin, output_path):
         raise RuntimeError("CHZZK CLI가 다운로드한 영상 파일을 찾지 못했습니다.")
 
     source_video = max(video_files, key=os.path.getsize)
-    command = [
-        ffmpeg_bin, "-y", "-i", source_video,
-        "-vn", "-c:a", "copy", "-f", "mpegts", output_path,
-    ]
+    command = [ffmpeg_bin, "-y"]
+    if start_sec > 0:
+        command.extend(["-ss", str(start_sec)])
+    command.extend(["-i", source_video])
+    if end_sec is not None:
+        command.extend(["-t", str(end_sec - start_sec)])
+    command.extend(["-vn", "-c:a", "copy", "-f", "mpegts", output_path])
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if result.returncode != 0 or not os.path.exists(output_path):
         raise RuntimeError(f"CHZZK CLI 영상 오디오 추출 실패: {result.stderr[-500:]}")
 
 
-def download_chzzk_vod_audio(chzzk_url, vod_id, output_filename="full_vod_audio"):
+def download_chzzk_vod_audio(
+    chzzk_url, vod_id, output_filename="full_vod_audio", start_sec=0, end_sec=None
+):
     chzzk_url = sanitize_chzzk_url(chzzk_url)
     specific_palette_dir = os.path.join(os.getcwd(), "voicepalette", f"VOD_{vod_id}")
 
@@ -363,10 +375,21 @@ def download_chzzk_vod_audio(chzzk_url, vod_id, output_filename="full_vod_audio"
         print(f"❌ [폴더 생성 실패] {e}")
         return ""
 
+    is_partial = start_sec > 0 or end_sec is not None
+    if is_partial:
+        if end_sec is None or start_sec < 0 or end_sec <= start_sec:
+            print("❌ 올바르지 않은 오디오 추출 시간 범위입니다.")
+            return ""
+        output_filename = f"range_audio_{int(start_sec)}_{int(end_sec)}"
     master_audio_ts = os.path.join(specific_palette_dir, f"{output_filename}.ts")
 
-    if os.path.exists(master_audio_ts) and os.path.getsize(master_audio_ts) > 102400:
-        print(f"✨ [오디오 캐시 적중] 전체 원본 TS 파일 로드 완료: {master_audio_ts}")
+    def has_valid_audio():
+        minimum_size = 1024 if is_partial else 102400
+        return os.path.exists(master_audio_ts) and os.path.getsize(master_audio_ts) > minimum_size
+
+    if has_valid_audio():
+        cache_kind = "구간" if is_partial else "전체 원본"
+        print(f"✨ [오디오 캐시 적중] {cache_kind} TS 파일 로드 완료: {master_audio_ts}")
         return master_audio_ts
 
     ffmpeg_bin = FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else "ffmpeg"
@@ -376,7 +399,19 @@ def download_chzzk_vod_audio(chzzk_url, vod_id, output_filename="full_vod_audio"
         print("❌ VOD 메타데이터 파싱 실패.")
         return ""
 
-    print(f"\n📡 [최초 1회 실행] 멀티스레드 오디오 수집 개시...")
+    if is_partial:
+        print(
+            f"\n✂️ [구간 오디오 수집] ffmpeg로 {int(start_sec)}초 ~ "
+            f"{int(end_sec)}초 구간만 추출합니다."
+        )
+        try:
+            _download_chzzk_api_audio(
+                chzzk_url, vod_id, master_audio_ts, ffmpeg_bin, start_sec, end_sec
+            )
+        except Exception as error:
+            print(f"⚠️ CHZZK API 구간 오디오 다운로드 실패: {error}")
+    else:
+        print(f"\n📡 [최초 1회 실행] 멀티스레드 오디오 수집 개시...")
 
     ydl_opts = {
         'format': 'bestaudio/worst',
@@ -395,13 +430,14 @@ def download_chzzk_vod_audio(chzzk_url, vod_id, output_filename="full_vod_audio"
         'postprocessors': [],
     }
 
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(chzzk_url, download=True)
-    except Exception as e:
-        print(f"⚠️ 멀티스레드 다운로드 중 예외 발생 (확인 프로세스 진행): {e}")
+    if not is_partial:
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(chzzk_url, download=True)
+        except Exception as e:
+            print(f"⚠️ 멀티스레드 다운로드 중 예외 발생 (확인 프로세스 진행): {e}")
 
-    if not os.path.exists(master_audio_ts):
+    if not is_partial and not has_valid_audio():
         extensions = ['*.ts', '*.m4a', '*.aac', '*.mp3']
         found_files = []
         for ext in extensions:
@@ -419,28 +455,35 @@ def download_chzzk_vod_audio(chzzk_url, vod_id, output_filename="full_vod_audio"
                 try: os.remove(downloaded_file)
                 except: pass
 
-    if not os.path.exists(master_audio_ts):
+    if not has_valid_audio():
         try:
             print("📡 yt-dlp 실패 → CHZZK playback API 직접 오디오 다운로드를 시도합니다.")
-            _download_chzzk_api_audio(chzzk_url, vod_id, master_audio_ts, ffmpeg_bin)
+            _download_chzzk_api_audio(
+                chzzk_url, vod_id, master_audio_ts, ffmpeg_bin, start_sec, end_sec
+            )
         except Exception as error:
             print(f"⚠️ CHZZK API 오디오 다운로드 실패: {error}")
 
-    if not os.path.exists(master_audio_ts):
+    if not has_valid_audio():
         try:
             print("📡 API 실패 → ChzzkVideoDownloader CLI fallback을 시도합니다.")
-            _download_chzzk_cli_video(chzzk_url, specific_palette_dir, ffmpeg_bin, master_audio_ts)
+            _download_chzzk_cli_video(
+                chzzk_url, specific_palette_dir, ffmpeg_bin, master_audio_ts,
+                start_sec, end_sec
+            )
         except Exception as error:
             print(f"⚠️ ChzzkVideoDownloader fallback 실패: {error}")
 
-    if not os.path.exists(master_audio_ts) or os.path.getsize(master_audio_ts) < 1024:
+    if not has_valid_audio():
         print("❌ 원본 오디오 TS 마스터 스트림 파일 생성 실패.")
         return ""
 
     print("✅ 원본 TS 오디오 캐시 빌드가 영구 보관되었습니다.")
     return master_audio_ts
 
-def transcribe_chzzk_audio(audio_path, target_path, model_size="base"):
+def transcribe_chzzk_audio(
+    audio_path, target_path, model_size="base", timestamp_offset_sec=0
+):
     if os.path.exists(target_path) and os.path.getsize(target_path) > 10:
         print(f"✨ [STT 대본 캐시 적중] 이미 전사된 원본 전체 대본을 불러옵니다: {target_path}")
         with open(target_path, "r", encoding="utf-8") as f:
@@ -507,7 +550,7 @@ def transcribe_chzzk_audio(audio_path, target_path, model_size="base"):
         if os.path.getsize(chunk_file) < 1024:
             continue
 
-        current_offset_secs = idx * chunk_length_sec
+        current_offset_secs = timestamp_offset_sec + idx * chunk_length_sec
         print(f"🎙️ [{idx+1}/{len(chunk_files)}] 청크 전사 연산 진행 중: {os.path.basename(chunk_file)}")
 
         segments, info = model.transcribe(
@@ -552,22 +595,6 @@ def transcribe_chzzk_audio(audio_path, target_path, model_size="base"):
 
     print(f"✅ 원본 오프셋 전체 생대본 보관 완료! (보존 경로: {target_path})")
     return raw_script
-
-def parse_streamer_info_name(streamer_info_path) -> str:
-    if not os.path.exists(streamer_info_path):
-        return ""
-    try:
-        with open(streamer_info_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line_strip = line.strip()
-                if not line_strip or line_strip.startswith("#"):
-                    continue
-                if ":" in line_strip:
-                    return line_strip.split(":")[1].strip()
-                return line_strip
-    except:
-        pass
-    return ""
 
 def load_chzzk_streamers_raw_db(filename="chzzk_streamers.txt") -> str:
     db_path = os.path.join(os.getcwd(), filename)
@@ -636,15 +663,27 @@ def load_and_filter_streamers_db(input_script, streamers_db_path="chzzk_streamer
 
     return list(detected_members.keys())
 
-def generate_chzzk_timeline(input_script, chat_script="", actual_title="VOD제목", chzzk_url="", codex_model="", chunk_index=0):
+def generate_chzzk_timeline(
+    input_script,
+    chat_script="",
+    actual_title="VOD제목",
+    chzzk_url="",
+    codex_model="",
+    chunk_index=0,
+    use_collab_member_reference=True,
+    target_streamer="",
+):
     chzzk_url = sanitize_chzzk_url(chzzk_url)
 
     prompt_path = os.path.join(os.getcwd(), "prompt.txt")
     streamer_info_path = os.path.join(os.getcwd(), "streamer_info.txt")
     streamers_db_path = "chzzk_streamers.txt"
 
-    target_streamer = parse_streamer_info_name(streamer_info_path)
-    verified_collab_members = load_and_filter_streamers_db(input_script, streamers_db_path, target_streamer)
+    verified_collab_members = []
+    if use_collab_member_reference:
+        verified_collab_members = load_and_filter_streamers_db(
+            input_script, streamers_db_path, target_streamer
+        )
 
     streamer_stt_list = []
     for line in input_script.split("\n"):
@@ -675,7 +714,7 @@ def generate_chzzk_timeline(input_script, chat_script="", actual_title="VOD제�
         "- 이 경우 대주제는 반드시 **'저스트 채팅'**으로 분류하고, 소주제는 **'과거 합방 언급 및 토크'** 혹은 **'지난 방송 회상 및 토크'** 형태로 상황에 맞게 명확히 분리하십시오.\n\n"
         "🚨 [마스터 DB 기반 주어(닉네임) 유연성 제약]\n"
         "- 타임라인 본문 내용(content)을 구성할 때, 막연하고 모호한 일반 명사인 '스트리머'라는 단어는 최대한 지양하십시오.\n"
-        "- 제공된 [방송 진행 주인공 스트리머] 및 [참고용 실제 참여/언급 스트리머 목록]을 적극 참고하여, 주체적으로 행동하거나 핵심 멘트를 친 인물이 누구인지 명확히 구별하십시오.\n"
+        "- 제공된 방송 진행 주인공 정보와 선택적으로 제공되는 합방 참여자 정보를 참고하여, 주체적으로 행동하거나 핵심 멘트를 친 인물이 누구인지 명확히 구별하십시오.\n"
         "- 인물 식별이 필요하다고 판단되는 하이라이트 상황(단독 캐리, 솔로 플레이 에피소드 등)에서는 반드시 '주인공 스트리머 닉네임'을 주어로 명시하여 문장을 작성하되, 명사 형태로 끝맺으십시오. (예: '풍월량 솔로 캐리로 게임 승리')\n"
         "- 다인 합방 또는 디스코드 소통 상황에서 특정 타 스트리머가 리액션을 주도했거나 티키타카가 발생한 경우, 해당 스트리머 목록 사전을 대조하여 대상 스트리머의 정식 닉네임을 주어로 명확히 지정하되, 이 역시 명사형으로 간결하게 작성하십시오. (예: '삼식의 갑작스러운 뇌절 리액션')"
     )
@@ -690,14 +729,19 @@ def generate_chzzk_timeline(input_script, chat_script="", actual_title="VOD제�
         with open(streamer_info_path, "r", encoding="utf-8") as f:
             system_prompt_content += "\n=====[스트리머 정보 레퍼런스]=====\n" + f.read()
 
-    collab_text_guide = ", ".join(verified_collab_members) if verified_collab_members else "없음"
+    collab_member_reference = ""
+    if use_collab_member_reference:
+        collab_text_guide = ", ".join(verified_collab_members) if verified_collab_members else "없음"
+        collab_member_reference = (
+            f"📢 [참고용 실제 참여/언급 스트리머 목록]: {collab_text_guide}\n"
+        )
 
     user_content = (
         f"영상 제목: {actual_title}\n"
         f"주소: {chzzk_url}\n"
         f"현재 분석 청크 인덱스: {chunk_index}\n"
         f"🎯 [방송 진행 주인공 스트리머]: {target_streamer}\n"
-        f"📢 [참고용 실제 참여/언급 스트리머 목록]: {collab_text_guide}\n"
+        f"{collab_member_reference}"
         f"🚨 [강제 제약 사항]: 소주제(topic)에는 위 목록에 있는 인물을 포함하여 그 어떤 사람의 닉네임도 적지 마십시오.\n\n"
         f"[오디오 STT 데이터 원본]\n{input_script}\n\n"
         f"[시청자 실시간 채팅 데이터 원본]\n{chat_script}"

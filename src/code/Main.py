@@ -22,6 +22,7 @@ from Timeline import (
     timestamp_to_seconds,
     correct_streamer_nicknames_with_codex,
     ensure_codex_ready,
+    load_chzzk_streamers_raw_db,
 )
 
 def parse_chat_timestamp_to_secs(chat_line):
@@ -36,6 +37,103 @@ def parse_chat_timestamp_to_secs(chat_line):
         return m * 60 + s
 
     return None
+
+
+def parse_time_input(value):
+    """Parse MM:SS or HH:MM:SS user input into absolute VOD seconds."""
+    parts = value.strip().split(":")
+    if len(parts) not in (2, 3) or any(not part.isdigit() for part in parts):
+        raise ValueError("시간은 MM:SS 또는 HH:MM:SS 형식이어야 합니다.")
+
+    numbers = [int(part) for part in parts]
+    if len(numbers) == 2:
+        hours = 0
+        minutes, seconds = numbers
+    else:
+        hours, minutes, seconds = numbers
+
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError("분과 초는 0부터 59 사이여야 합니다.")
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def format_time_label(total_seconds):
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}-{minutes:02d}-{seconds:02d}"
+
+
+def ask_analysis_time_range(total_duration_secs):
+    duration_text = format_time_label(total_duration_secs).replace("-", ":")
+    range_text = f"00:00:00 ~ {duration_text}"
+    while True:
+        start_input = input(
+            f"➡️ 분석 시작 시간을 입력하세요 (영상 범위: {range_text}, "
+            "MM:SS 또는 HH:MM:SS, 기본값: 00:00): "
+        ).strip()
+        end_input = input(
+            f"➡️ 분석 종료 시간을 입력하세요 (영상 범위: {range_text}, "
+            f"MM:SS 또는 HH:MM:SS, 기본값: {duration_text}): "
+        ).strip()
+        try:
+            start_sec = parse_time_input(start_input or "00:00")
+            end_sec = parse_time_input(end_input or duration_text)
+            if start_sec >= end_sec:
+                raise ValueError("종료 시간은 시작 시간보다 뒤여야 합니다.")
+            if end_sec > total_duration_secs:
+                raise ValueError(f"종료 시간이 VOD 길이({duration_text})를 넘을 수 없습니다.")
+            return start_sec, end_sec
+        except ValueError as error:
+            print(f"❌ {error} 다시 입력해 주세요.")
+
+
+def show_collab_member_reference_preview(preview_lines=12):
+    filename = "chzzk_streamers.txt"
+    db_path = os.path.abspath(filename)
+    raw_content = load_chzzk_streamers_raw_db(filename)
+
+    print(f"\n📄 [{filename}] 내용 미리보기 (최대 {preview_lines}줄)")
+    print("-------------------------------------------------------------------------")
+    if not raw_content:
+        print("(파일 내용이 없거나 읽을 수 없습니다.)")
+    else:
+        lines = raw_content.splitlines()
+        for line in lines[:preview_lines]:
+            print(line)
+        if len(lines) > preview_lines:
+            print(f"... (이하 {len(lines) - preview_lines}줄 생략)")
+    print("-------------------------------------------------------------------------")
+    print(f"💡 전체 파일 열기: {db_path}")
+
+
+def ask_use_collab_member_reference():
+    show_collab_member_reference_preview()
+
+    while True:
+        answer = input(
+            "➡️ 합방 멤버 참고 목록을 사용할까요? "
+            "(y/n/e, 기본값: y / e: 파일 열기): "
+        ).strip().lower()
+
+        if answer in {"e", "edit", "편집"}:
+            try:
+                os.startfile(os.path.abspath("chzzk_streamers.txt"))
+                print("✏️ chzzk_streamers.txt를 기본 편집기로 열었습니다.")
+                print("   수정 후 이 창으로 돌아와 y 또는 n을 입력하세요.")
+            except Exception as e:
+                print(f"⚠️ 파일을 자동으로 열지 못했습니다: {e}")
+                print(f"   직접 열어 수정해 주세요: {os.path.abspath('chzzk_streamers.txt')}")
+            continue
+
+        if answer in {"", "y", "yes", "예", "ㅇ"}:
+            return True
+
+        if answer in {"n", "no", "아니오", "ㄴ"}:
+            return False
+
+        print("❌ y(사용), n(미사용), e(파일 열기) 중 하나를 입력해 주세요.")
+
 
 def process_direct_comment_mode():
     print("\n-------------------------------------------------------------------------")
@@ -72,7 +170,45 @@ def process_direct_comment_mode():
         print(f"초안 파일을 직접 열어 수정해 주세요: {os.path.abspath(selected_file)}")
 
 
-def run_pure_test():
+def load_prepared_timeline_materials(vod_id):
+    full_script_path = os.path.join(
+        os.getcwd(), "voicepalette", f"VOD_{vod_id}", "full_raw_script.txt"
+    )
+    full_chat_path = os.path.join(
+        os.getcwd(), "chat_cache", str(vod_id), f"chat_{vod_id}_full.txt"
+    )
+
+    missing_materials = []
+    if not os.path.isfile(full_script_path) or os.path.getsize(full_script_path) <= 10:
+        missing_materials.append(f"STT 대본: {full_script_path}")
+    if not os.path.isfile(full_chat_path) or os.path.getsize(full_chat_path) <= 0:
+        missing_materials.append(f"채팅 캐시: {full_chat_path}")
+
+    if missing_materials:
+        print("❌ 타임라인만 다시 만들기 위한 재료가 부족합니다.")
+        for material in missing_materials:
+            print(f"   - {material}")
+        print("💡 먼저 일반 생성 모드를 한 번 실행해 STT 대본과 채팅 캐시를 준비해 주세요.")
+        return ""
+
+    try:
+        with open(full_script_path, "r", encoding="utf-8") as f:
+            full_transcription = f.read()
+    except (OSError, UnicodeError) as e:
+        print(f"❌ 준비된 STT 대본을 읽지 못했습니다: {e}")
+        return ""
+
+    if not full_transcription.strip():
+        print("❌ 준비된 STT 대본이 비어 있습니다.")
+        return ""
+
+    print("✨ [재료 재사용] 오디오 다운로드와 STT 변환을 건너뜁니다.")
+    print(f"   - STT 대본: {full_script_path}")
+    print(f"   - 채팅 캐시: {full_chat_path}")
+    return full_transcription
+
+
+def run_pure_test(timeline_only=False):
     print("\n-------------------------------------------------------------------------")
     print("🤖 AI 기반 새 VOD 타임라인 생성 및 추출 모드 시작")
     print("-------------------------------------------------------------------------")
@@ -100,40 +236,61 @@ def run_pure_test():
         print("❌ 올바른 숫자가 아닙니다. 기본값인 10개로 탐색을 시작합니다.")
         vod_limit = 10
 
-    vod_id, actual_title, video_duration = select_chzzk_vod(TARGET_CHANNEL_ID, limit=vod_limit)
+    vod_id, actual_title, video_duration, target_streamer = select_chzzk_vod(
+        TARGET_CHANNEL_ID,
+        limit=vod_limit,
+    )
     if not vod_id:
         print("❌ 유효한 치지직 VOD 일련번호를 획득하지 못했습니다.")
         return
+    if not target_streamer:
+        print("⚠️ 선택한 VOD에서 채널명을 확인하지 못해 주인공 스트리머명을 비워 둡니다.")
 
     full_vod_url = f"https://chzzk.naver.com/video/{vod_id}"
     print(f"\n🎬 선택된 타겟 방송: [{actual_title}] (VOD ID: {vod_id})")
 
-    try:
-        start_percent = float(input("➡️ 전체 분석 시작 시간 백분율을 입력하세요 (예: 0 -> 처음부터): ").strip())
-        end_percent = float(input("➡️ 전체 분석 종료 시간 백분율을 입력하세요 (예: 100 -> 끝까지): ").strip())
-    except ValueError:
-        print("❌ 올바른 숫자를 입력하세요. 기본값(0% ~ 100%)으로 매핑하여 시작합니다.")
-        start_percent = 0.0
-        end_percent = 100.0
+    if not video_duration or video_duration <= 0:
+        print("❌ VOD 길이를 확인하지 못해 시간 구간을 안전하게 계산할 수 없습니다.")
+        return
+    total_duration_secs = int(video_duration)
+    global_start_sec, global_end_sec = ask_analysis_time_range(total_duration_secs)
 
-    total_duration_secs = video_duration if video_duration > 0 else 14400
-    global_start_sec = int(total_duration_secs * (start_percent / 100.0))
-    global_end_sec = int(total_duration_secs * (end_percent / 100.0))
+    use_collab_member_reference = ask_use_collab_member_reference()
+    if use_collab_member_reference:
+        print("👥 합방 멤버 자동 감지 참고 목록을 사용합니다.")
+    else:
+        print("👥 합방 멤버 자동 감지 참고 목록을 사용하지 않습니다.")
 
     print(f"⏱️ 영상 총 환산 시간: 약 {total_duration_secs}초")
     print(f"🎯 전체 분석 타겟 구간: {global_start_sec}초 ~ {global_end_sec}초 범위")
 
-    master_audio_path = download_chzzk_vod_audio(chzzk_url=full_vod_url, vod_id=vod_id)
-    if not master_audio_path or not os.path.exists(master_audio_path):
-        print("❌ 전체 오디오 캐시 데이터 생성 과정에 실패했습니다.")
-        return
+    if timeline_only:
+        full_transcription = load_prepared_timeline_materials(vod_id)
+    else:
+        is_full_range = global_start_sec == 0 and global_end_sec == total_duration_secs
+        master_audio_path = download_chzzk_vod_audio(
+            chzzk_url=full_vod_url,
+            vod_id=vod_id,
+            start_sec=global_start_sec,
+            end_sec=None if is_full_range else global_end_sec,
+        )
+        if not master_audio_path or not os.path.exists(master_audio_path):
+            print("❌ 전체 오디오 캐시 데이터 생성 과정에 실패했습니다.")
+            return
 
-    full_script_path = os.path.join(os.getcwd(), "voicepalette", f"VOD_{vod_id}", "full_raw_script.txt")
-    full_transcription = transcribe_chzzk_audio(
-        audio_path=master_audio_path,
-        target_path=full_script_path,
-        model_size=WHISPER_MODEL
-    )
+        script_filename = (
+            "full_raw_script.txt" if is_full_range
+            else f"raw_script_{global_start_sec}_{global_end_sec}.txt"
+        )
+        full_script_path = os.path.join(
+            os.getcwd(), "voicepalette", f"VOD_{vod_id}", script_filename
+        )
+        full_transcription = transcribe_chzzk_audio(
+            audio_path=master_audio_path,
+            target_path=full_script_path,
+            model_size=WHISPER_MODEL,
+            timestamp_offset_sec=global_start_sec,
+        )
     if not full_transcription.strip():
         print("❌ VOD 전체 대본(STT) 데이터가 유효하지 않거나 비어있습니다.")
         return
@@ -181,7 +338,9 @@ def run_pure_test():
             actual_title=actual_title,
             chzzk_url=full_vod_url,
             codex_model=CODEX_MODEL,
-            chunk_index=chunk_index
+            chunk_index=chunk_index,
+            use_collab_member_reference=use_collab_member_reference,
+            target_streamer=target_streamer,
         )
 
         if chunk_items:
@@ -224,7 +383,9 @@ def run_pure_test():
     cleaned_final_lines.insert(0, ai_notice)
 
     final_timeline_string = "\n".join(cleaned_final_lines)
-    output_path = f"TL_VOD_{vod_id}_{int(start_percent)}_{int(end_percent)}.txt"
+    start_label = format_time_label(global_start_sec)
+    end_label = format_time_label(global_end_sec)
+    output_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}.txt"
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_timeline_string)
@@ -259,15 +420,18 @@ if __name__ == "__main__":
     print("=========================================================================")
     print("                  치지직 VOD 타임라인 매니저                 ")
     print("=========================================================================")
-    print(" [1] AI 연산 실행하여 새 타임라인 파일 생성하기")
-    print(" [2] 기존 타임라인 초안을 열어 수정하기")
+    print(" [1] 새 재료를 준비하고 타임라인 파일 생성하기")
+    print(" [2] 준비된 재료로 타임라인만 다시 만들기")
+    print(" [3] 기존 타임라인 초안을 열어 수정하기")
     print("-------------------------------------------------------------------------")
 
-    menu = input("👉 원하시는 모드 번호를 선택하세요 (1 또는 2): ").strip()
+    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2 또는 3): ").strip()
 
     if menu == "1":
         run_pure_test()
     elif menu == "2":
+        run_pure_test(timeline_only=True)
+    elif menu == "3":
         process_direct_comment_mode()
     else:
         print("❌ 올바른 선택이 아닙니다. 프로그램을 종료합니다.")
