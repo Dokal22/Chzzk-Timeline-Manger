@@ -22,6 +22,7 @@ from Timeline import (
     timestamp_to_seconds,
     correct_streamer_nicknames_with_codex,
     ensure_codex_ready,
+    load_chzzk_streamers_raw_db,
 )
 
 def parse_chat_timestamp_to_secs(chat_line):
@@ -38,12 +39,51 @@ def parse_chat_timestamp_to_secs(chat_line):
     return None
 
 
+def show_collab_member_reference_preview(preview_lines=12):
+    filename = "chzzk_streamers.txt"
+    db_path = os.path.abspath(filename)
+    raw_content = load_chzzk_streamers_raw_db(filename)
+
+    print(f"\n📄 [{filename}] 내용 미리보기 (최대 {preview_lines}줄)")
+    print("-------------------------------------------------------------------------")
+    if not raw_content:
+        print("(파일 내용이 없거나 읽을 수 없습니다.)")
+    else:
+        lines = raw_content.splitlines()
+        for line in lines[:preview_lines]:
+            print(line)
+        if len(lines) > preview_lines:
+            print(f"... (이하 {len(lines) - preview_lines}줄 생략)")
+    print("-------------------------------------------------------------------------")
+    print(f"💡 전체 파일 열기: {db_path}")
+
+
 def ask_use_collab_member_reference():
-    answer = input(
-        "➡️ chzzk_streamers.txt에서 합방 멤버를 자동 감지해 AI 참고 목록에 넣을까요? "
-        "(Y/n, 기본값: Y): "
-    ).strip().lower()
-    return answer not in {"n", "no", "아니오"}
+    show_collab_member_reference_preview()
+
+    while True:
+        answer = input(
+            "➡️ 합방 멤버 참고 목록을 사용할까요? "
+            "(y/n/e, 기본값: y / e: 파일 열기): "
+        ).strip().lower()
+
+        if answer in {"e", "edit", "편집"}:
+            try:
+                os.startfile(os.path.abspath("chzzk_streamers.txt"))
+                print("✏️ chzzk_streamers.txt를 기본 편집기로 열었습니다.")
+                print("   수정 후 이 창으로 돌아와 y 또는 n을 입력하세요.")
+            except Exception as e:
+                print(f"⚠️ 파일을 자동으로 열지 못했습니다: {e}")
+                print(f"   직접 열어 수정해 주세요: {os.path.abspath('chzzk_streamers.txt')}")
+            continue
+
+        if answer in {"", "y", "yes", "예", "ㅇ"}:
+            return True
+
+        if answer in {"n", "no", "아니오", "ㄴ"}:
+            return False
+
+        print("❌ y(사용), n(미사용), e(파일 열기) 중 하나를 입력해 주세요.")
 
 
 def process_direct_comment_mode():
