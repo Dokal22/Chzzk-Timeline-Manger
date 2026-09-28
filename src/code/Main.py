@@ -18,14 +18,21 @@ from Timeline import (
     download_chzzk_vod_audio,
     transcribe_chzzk_audio,
     generate_chzzk_timeline,
-    load_reference_context,
-    prepare_streamer_profile,
     merge_and_format_final_timeline,
     timestamp_to_seconds,
     correct_streamer_nicknames_with_codex,
     ensure_codex_ready,
     load_chzzk_streamers_raw_db,
 )
+
+try:
+    from Timeline import load_reference_context, prepare_streamer_profile
+except ImportError:
+    def load_reference_context(*args, **kwargs):
+        return ""
+
+    def prepare_streamer_profile(target_channel_id="", target_streamer="", **kwargs):
+        return target_streamer, ""
 
 def parse_chat_timestamp_to_secs(chat_line):
     match = re.match(r"^\[(\d{2}):(\d{2}):(\d{2})\]", chat_line)
@@ -238,10 +245,15 @@ def run_pure_test(timeline_only=False):
         print("❌ 올바른 숫자가 아닙니다. 기본값인 10개로 탐색을 시작합니다.")
         vod_limit = 10
 
-    vod_id, actual_title, video_duration, target_streamer, target_channel_id = select_chzzk_vod(
+    selected_vod = select_chzzk_vod(
         TARGET_CHANNEL_ID,
         limit=vod_limit,
     )
+    if len(selected_vod) == 5:
+        vod_id, actual_title, video_duration, target_streamer, target_channel_id = selected_vod
+    else:
+        vod_id, actual_title, video_duration, target_streamer = selected_vod
+        target_channel_id = TARGET_CHANNEL_ID
     if not vod_id:
         print("❌ 유효한 치지직 VOD 일련번호를 획득하지 못했습니다.")
         return
