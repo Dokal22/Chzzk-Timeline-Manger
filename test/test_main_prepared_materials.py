@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 def load_main_module():
@@ -79,6 +80,75 @@ class PreparedTimelineMaterialsTest(unittest.TestCase):
             self.assertEqual("", result)
             self.assertIn("STT 대본", output.getvalue())
             self.assertIn("채팅 캐시", output.getvalue())
+
+    def test_parses_supported_time_formats(self):
+        self.assertEqual(754, self.main.parse_time_input("12:34"))
+        self.assertEqual(3723, self.main.parse_time_input("01:02:03"))
+
+    def test_rejects_invalid_time_components(self):
+        for invalid_value in ("90", "1:60", "00:00:60", "aa:bb"):
+            with self.subTest(invalid_value=invalid_value):
+                with self.assertRaises(ValueError):
+                    self.main.parse_time_input(invalid_value)
+
+    def test_time_range_reprompts_until_valid(self):
+        values = iter(("00:20", "00:10", "00:05", "00:30"))
+        with mock.patch("builtins.input", side_effect=lambda *_: next(values)):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = self.main.ask_analysis_time_range(60)
+        self.assertEqual((5, 30), result)
+
+    def test_time_range_prompt_shows_full_video_range(self):
+        values = iter(("00:00", "01:00"))
+        output = io.StringIO()
+        def fake_input(prompt):
+            output.write(prompt)
+            return next(values)
+
+        with mock.patch("builtins.input", side_effect=fake_input):
+            self.main.ask_analysis_time_range(35670)
+        self.assertIn("영상 범위: 00:00:00 ~ 09:54:30", output.getvalue())
+
+    def test_normal_mode_passes_range_to_audio_and_stt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "range_audio.ts"
+            audio_path.write_bytes(b"audio")
+            download_audio = mock.Mock(return_value=str(audio_path))
+            transcribe = mock.Mock(return_value="[00:10:00] 테스트 대본")
+
+            patches = (
+                mock.patch.object(self.main, "ensure_codex_ready"),
+                mock.patch.object(
+                    self.main, "select_chzzk_vod",
+                    return_value=("123", "테스트 VOD", 3600, "스트리머"),
+                ),
+                mock.patch.object(self.main, "ask_use_collab_member_reference", return_value=False),
+                mock.patch.object(self.main, "download_chzzk_vod_audio", download_audio),
+                mock.patch.object(self.main, "transcribe_chzzk_audio", transcribe),
+                mock.patch.object(self.main, "download_chzzk_vod_chats", return_value=""),
+                mock.patch.object(self.main, "timestamp_to_seconds", return_value=600),
+                mock.patch.object(self.main, "generate_chzzk_timeline", return_value=[]),
+                mock.patch("builtins.input", side_effect=("", "00:10:00", "00:20:00")),
+            )
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(temp_dir)
+                with contextlib.ExitStack() as stack:
+                    for active_patch in patches:
+                        stack.enter_context(active_patch)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.main.run_pure_test()
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(600, download_audio.call_args.kwargs["start_sec"])
+            self.assertEqual(1200, download_audio.call_args.kwargs["end_sec"])
+            self.assertEqual(600, transcribe.call_args.kwargs["timestamp_offset_sec"])
+            self.assertTrue(
+                transcribe.call_args.kwargs["target_path"].endswith(
+                    os.path.join("VOD_123", "raw_script_600_1200.txt")
+                )
+            )
 
 
 if __name__ == "__main__":

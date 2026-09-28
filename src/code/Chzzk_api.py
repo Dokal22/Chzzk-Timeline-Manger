@@ -349,7 +349,7 @@ def download_chzzk_vod_chats(video_no, start_sec, end_sec):
         if match:
             h, m, s = map(int, match.groups())
             line_sec = h * 3600 + m * 60 + s
-            if start_sec <= line_sec <= end_sec:
+            if start_sec <= line_sec < end_sec:
                 sliced_lines.append(line)
                 
     if not sliced_lines:

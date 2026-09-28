@@ -39,6 +39,55 @@ def parse_chat_timestamp_to_secs(chat_line):
     return None
 
 
+def parse_time_input(value):
+    """Parse MM:SS or HH:MM:SS user input into absolute VOD seconds."""
+    parts = value.strip().split(":")
+    if len(parts) not in (2, 3) or any(not part.isdigit() for part in parts):
+        raise ValueError("시간은 MM:SS 또는 HH:MM:SS 형식이어야 합니다.")
+
+    numbers = [int(part) for part in parts]
+    if len(numbers) == 2:
+        hours = 0
+        minutes, seconds = numbers
+    else:
+        hours, minutes, seconds = numbers
+
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError("분과 초는 0부터 59 사이여야 합니다.")
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def format_time_label(total_seconds):
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}-{minutes:02d}-{seconds:02d}"
+
+
+def ask_analysis_time_range(total_duration_secs):
+    duration_text = format_time_label(total_duration_secs).replace("-", ":")
+    range_text = f"00:00:00 ~ {duration_text}"
+    while True:
+        start_input = input(
+            f"➡️ 분석 시작 시간을 입력하세요 (영상 범위: {range_text}, "
+            "MM:SS 또는 HH:MM:SS, 기본값: 00:00): "
+        ).strip()
+        end_input = input(
+            f"➡️ 분석 종료 시간을 입력하세요 (영상 범위: {range_text}, "
+            f"MM:SS 또는 HH:MM:SS, 기본값: {duration_text}): "
+        ).strip()
+        try:
+            start_sec = parse_time_input(start_input or "00:00")
+            end_sec = parse_time_input(end_input or duration_text)
+            if start_sec >= end_sec:
+                raise ValueError("종료 시간은 시작 시간보다 뒤여야 합니다.")
+            if end_sec > total_duration_secs:
+                raise ValueError(f"종료 시간이 VOD 길이({duration_text})를 넘을 수 없습니다.")
+            return start_sec, end_sec
+        except ValueError as error:
+            print(f"❌ {error} 다시 입력해 주세요.")
+
+
 def show_collab_member_reference_preview(preview_lines=12):
     filename = "chzzk_streamers.txt"
     db_path = os.path.abspath(filename)
@@ -200,13 +249,11 @@ def run_pure_test(timeline_only=False):
     full_vod_url = f"https://chzzk.naver.com/video/{vod_id}"
     print(f"\n🎬 선택된 타겟 방송: [{actual_title}] (VOD ID: {vod_id})")
 
-    try:
-        start_percent = float(input("➡️ 전체 분석 시작 시간 백분율을 입력하세요 (예: 0 -> 처음부터): ").strip())
-        end_percent = float(input("➡️ 전체 분석 종료 시간 백분율을 입력하세요 (예: 100 -> 끝까지): ").strip())
-    except ValueError:
-        print("❌ 올바른 숫자를 입력하세요. 기본값(0% ~ 100%)으로 매핑하여 시작합니다.")
-        start_percent = 0.0
-        end_percent = 100.0
+    if not video_duration or video_duration <= 0:
+        print("❌ VOD 길이를 확인하지 못해 시간 구간을 안전하게 계산할 수 없습니다.")
+        return
+    total_duration_secs = int(video_duration)
+    global_start_sec, global_end_sec = ask_analysis_time_range(total_duration_secs)
 
     use_collab_member_reference = ask_use_collab_member_reference()
     if use_collab_member_reference:
@@ -214,26 +261,35 @@ def run_pure_test(timeline_only=False):
     else:
         print("👥 합방 멤버 자동 감지 참고 목록을 사용하지 않습니다.")
 
-    total_duration_secs = video_duration if video_duration > 0 else 14400
-    global_start_sec = int(total_duration_secs * (start_percent / 100.0))
-    global_end_sec = int(total_duration_secs * (end_percent / 100.0))
-
     print(f"⏱️ 영상 총 환산 시간: 약 {total_duration_secs}초")
     print(f"🎯 전체 분석 타겟 구간: {global_start_sec}초 ~ {global_end_sec}초 범위")
 
     if timeline_only:
         full_transcription = load_prepared_timeline_materials(vod_id)
     else:
-        master_audio_path = download_chzzk_vod_audio(chzzk_url=full_vod_url, vod_id=vod_id)
+        is_full_range = global_start_sec == 0 and global_end_sec == total_duration_secs
+        master_audio_path = download_chzzk_vod_audio(
+            chzzk_url=full_vod_url,
+            vod_id=vod_id,
+            start_sec=global_start_sec,
+            end_sec=None if is_full_range else global_end_sec,
+        )
         if not master_audio_path or not os.path.exists(master_audio_path):
             print("❌ 전체 오디오 캐시 데이터 생성 과정에 실패했습니다.")
             return
 
-        full_script_path = os.path.join(os.getcwd(), "voicepalette", f"VOD_{vod_id}", "full_raw_script.txt")
+        script_filename = (
+            "full_raw_script.txt" if is_full_range
+            else f"raw_script_{global_start_sec}_{global_end_sec}.txt"
+        )
+        full_script_path = os.path.join(
+            os.getcwd(), "voicepalette", f"VOD_{vod_id}", script_filename
+        )
         full_transcription = transcribe_chzzk_audio(
             audio_path=master_audio_path,
             target_path=full_script_path,
-            model_size=WHISPER_MODEL
+            model_size=WHISPER_MODEL,
+            timestamp_offset_sec=global_start_sec,
         )
     if not full_transcription.strip():
         print("❌ VOD 전체 대본(STT) 데이터가 유효하지 않거나 비어있습니다.")
@@ -327,7 +383,9 @@ def run_pure_test(timeline_only=False):
     cleaned_final_lines.insert(0, ai_notice)
 
     final_timeline_string = "\n".join(cleaned_final_lines)
-    output_path = f"TL_VOD_{vod_id}_{int(start_percent)}_{int(end_percent)}.txt"
+    start_label = format_time_label(global_start_sec)
+    end_label = format_time_label(global_end_sec)
+    output_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}.txt"
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_timeline_string)
