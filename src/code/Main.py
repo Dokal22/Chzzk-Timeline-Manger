@@ -37,6 +37,15 @@ def parse_chat_timestamp_to_secs(chat_line):
 
     return None
 
+
+def ask_use_collab_member_reference():
+    answer = input(
+        "➡️ chzzk_streamers.txt에서 합방 멤버를 자동 감지해 AI 참고 목록에 넣을까요? "
+        "(Y/n, 기본값: Y): "
+    ).strip().lower()
+    return answer not in {"n", "no", "아니오"}
+
+
 def process_direct_comment_mode():
     print("\n-------------------------------------------------------------------------")
     print("📂 기존 타임라인 초안 열기 및 수정 모드")
@@ -116,6 +125,12 @@ def run_pure_test():
         start_percent = 0.0
         end_percent = 100.0
 
+    use_collab_member_reference = ask_use_collab_member_reference()
+    if use_collab_member_reference:
+        print("👥 합방 멤버 자동 감지 참고 목록을 사용합니다.")
+    else:
+        print("👥 합방 멤버 자동 감지 참고 목록을 사용하지 않습니다.")
+
     total_duration_secs = video_duration if video_duration > 0 else 14400
     global_start_sec = int(total_duration_secs * (start_percent / 100.0))
     global_end_sec = int(total_duration_secs * (end_percent / 100.0))
@@ -181,7 +196,8 @@ def run_pure_test():
             actual_title=actual_title,
             chzzk_url=full_vod_url,
             codex_model=CODEX_MODEL,
-            chunk_index=chunk_index
+            chunk_index=chunk_index,
+            use_collab_member_reference=use_collab_member_reference,
         )
 
         if chunk_items:

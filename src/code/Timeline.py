@@ -636,7 +636,15 @@ def load_and_filter_streamers_db(input_script, streamers_db_path="chzzk_streamer
 
     return list(detected_members.keys())
 
-def generate_chzzk_timeline(input_script, chat_script="", actual_title="VOD제목", chzzk_url="", codex_model="", chunk_index=0):
+def generate_chzzk_timeline(
+    input_script,
+    chat_script="",
+    actual_title="VOD제목",
+    chzzk_url="",
+    codex_model="",
+    chunk_index=0,
+    use_collab_member_reference=True,
+):
     chzzk_url = sanitize_chzzk_url(chzzk_url)
 
     prompt_path = os.path.join(os.getcwd(), "prompt.txt")
@@ -644,7 +652,11 @@ def generate_chzzk_timeline(input_script, chat_script="", actual_title="VOD제�
     streamers_db_path = "chzzk_streamers.txt"
 
     target_streamer = parse_streamer_info_name(streamer_info_path)
-    verified_collab_members = load_and_filter_streamers_db(input_script, streamers_db_path, target_streamer)
+    verified_collab_members = []
+    if use_collab_member_reference:
+        verified_collab_members = load_and_filter_streamers_db(
+            input_script, streamers_db_path, target_streamer
+        )
 
     streamer_stt_list = []
     for line in input_script.split("\n"):
@@ -675,7 +687,7 @@ def generate_chzzk_timeline(input_script, chat_script="", actual_title="VOD제�
         "- 이 경우 대주제는 반드시 **'저스트 채팅'**으로 분류하고, 소주제는 **'과거 합방 언급 및 토크'** 혹은 **'지난 방송 회상 및 토크'** 형태로 상황에 맞게 명확히 분리하십시오.\n\n"
         "🚨 [마스터 DB 기반 주어(닉네임) 유연성 제약]\n"
         "- 타임라인 본문 내용(content)을 구성할 때, 막연하고 모호한 일반 명사인 '스트리머'라는 단어는 최대한 지양하십시오.\n"
-        "- 제공된 [방송 진행 주인공 스트리머] 및 [참고용 실제 참여/언급 스트리머 목록]을 적극 참고하여, 주체적으로 행동하거나 핵심 멘트를 친 인물이 누구인지 명확히 구별하십시오.\n"
+        "- 제공된 방송 진행 주인공 정보와 선택적으로 제공되는 합방 참여자 정보를 참고하여, 주체적으로 행동하거나 핵심 멘트를 친 인물이 누구인지 명확히 구별하십시오.\n"
         "- 인물 식별이 필요하다고 판단되는 하이라이트 상황(단독 캐리, 솔로 플레이 에피소드 등)에서는 반드시 '주인공 스트리머 닉네임'을 주어로 명시하여 문장을 작성하되, 명사 형태로 끝맺으십시오. (예: '풍월량 솔로 캐리로 게임 승리')\n"
         "- 다인 합방 또는 디스코드 소통 상황에서 특정 타 스트리머가 리액션을 주도했거나 티키타카가 발생한 경우, 해당 스트리머 목록 사전을 대조하여 대상 스트리머의 정식 닉네임을 주어로 명확히 지정하되, 이 역시 명사형으로 간결하게 작성하십시오. (예: '삼식의 갑작스러운 뇌절 리액션')"
     )
@@ -690,14 +702,19 @@ def generate_chzzk_timeline(input_script, chat_script="", actual_title="VOD제�
         with open(streamer_info_path, "r", encoding="utf-8") as f:
             system_prompt_content += "\n=====[스트리머 정보 레퍼런스]=====\n" + f.read()
 
-    collab_text_guide = ", ".join(verified_collab_members) if verified_collab_members else "없음"
+    collab_member_reference = ""
+    if use_collab_member_reference:
+        collab_text_guide = ", ".join(verified_collab_members) if verified_collab_members else "없음"
+        collab_member_reference = (
+            f"📢 [참고용 실제 참여/언급 스트리머 목록]: {collab_text_guide}\n"
+        )
 
     user_content = (
         f"영상 제목: {actual_title}\n"
         f"주소: {chzzk_url}\n"
         f"현재 분석 청크 인덱스: {chunk_index}\n"
         f"🎯 [방송 진행 주인공 스트리머]: {target_streamer}\n"
-        f"📢 [참고용 실제 참여/언급 스트리머 목록]: {collab_text_guide}\n"
+        f"{collab_member_reference}"
         f"🚨 [강제 제약 사항]: 소주제(topic)에는 위 목록에 있는 인물을 포함하여 그 어떤 사람의 닉네임도 적지 마십시오.\n\n"
         f"[오디오 STT 데이터 원본]\n{input_script}\n\n"
         f"[시청자 실시간 채팅 데이터 원본]\n{chat_script}"
