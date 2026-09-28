@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+chat_cache/
+voicepalette/
+chzzk_streamers.txt
