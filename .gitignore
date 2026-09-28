@@ -4,3 +4,5 @@ voicepalette/
 __pycache__/
 *.pyc
 TL_VOD_*.txt
+*.py[cod]
+chzzk_streamers.txt
