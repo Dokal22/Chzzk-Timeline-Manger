@@ -1,0 +1,6 @@
+# Generated VOD materials and timeline outputs
+chat_cache/
+voicepalette/
+__pycache__/
+*.pyc
+TL_VOD_*.txt
