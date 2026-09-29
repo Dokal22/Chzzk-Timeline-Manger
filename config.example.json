@@ -1,0 +1,11 @@
+{
+    "TARGET_CHANNEL_ID": "치지직_32자리_채널_해시값",
+    "CODEX_MODEL": "",
+    "WHISPER_LANGUAGE": "ko",
+    "WHISPER_MODEL": "base",
+    "NAMUWIKI_PROFILE_ENABLED": false,
+    "REFERENCE_ENABLED": false,
+    "REFERENCE_DIR": "references",
+    "REFERENCE_URLS": [],
+    "REFERENCE_CACHE_DIR": "reference_cache"
+}

@@ -260,10 +260,13 @@ def run_pure_test(timeline_only=False):
     if not target_streamer:
         print("⚠️ 선택한 VOD에서 채널명을 확인하지 못해 주인공 스트리머명을 비워 둡니다.")
 
+    namuwiki_profile_enabled = CONFIG.get("NAMUWIKI_PROFILE_ENABLED", False)
+    if isinstance(namuwiki_profile_enabled, str):
+        namuwiki_profile_enabled = namuwiki_profile_enabled.strip().lower() in {"1", "true", "yes", "y", "on"}
     target_streamer, streamer_profile_context = prepare_streamer_profile(
         target_channel_id=target_channel_id,
         target_streamer=target_streamer,
-        legacy_path=os.path.join(os.getcwd(), "streamer_info.txt"),
+        namuwiki_enabled=bool(namuwiki_profile_enabled),
     )
 
     full_vod_url = f"https://chzzk.naver.com/video/{vod_id}"
