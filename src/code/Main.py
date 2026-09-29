@@ -4,6 +4,9 @@ import math
 import signal
 import re
 import glob
+import json
+import hashlib
+from datetime import datetime, timezone
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -217,7 +220,19 @@ def load_prepared_timeline_materials(vod_id):
     return full_transcription
 
 
-def run_pure_test(timeline_only=False):
+def _sha256_text(value):
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(65536), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def run_pure_test(timeline_only=False, experiment_mode=None):
     print("\n-------------------------------------------------------------------------")
     print("🤖 AI 기반 새 VOD 타임라인 생성 및 추출 모드 시작")
     print("-------------------------------------------------------------------------")
@@ -225,6 +240,11 @@ def run_pure_test(timeline_only=False):
     TARGET_CHANNEL_ID = CONFIG.get("TARGET_CHANNEL_ID")
     CODEX_MODEL = CONFIG.get("CODEX_MODEL", "")
     WHISPER_MODEL = CONFIG.get("WHISPER_MODEL", "base")
+    is_t1 = str(experiment_mode or "").strip().lower() == "t1"
+    prompt_profile_path = os.path.abspath("prompt_t1.txt") if is_t1 else None
+    if is_t1 and not os.path.isfile(prompt_profile_path):
+        print(f"❌ T1 프롬프트 프로필을 찾지 못했습니다: {prompt_profile_path}")
+        return
 
     try:
         ensure_codex_ready()
@@ -335,6 +355,10 @@ def run_pure_test(timeline_only=False):
     script_lines = full_transcription.split("\n")
     CHUNK_SIZE_SECS = 3600
     all_raw_items = []
+    experiment_chunks = []
+    experiment_dir = os.path.join(os.getcwd(), "experiment_artifacts", "t1") if is_t1 else None
+    if is_t1:
+        os.makedirs(experiment_dir, exist_ok=True)
 
     current_chunk_start = global_start_sec
     while current_chunk_start < global_end_sec:
@@ -369,6 +393,9 @@ def run_pure_test(timeline_only=False):
             pass
 
         print(f"🚀 Codex 구독 모델 호출 중 (청크 인덱스: {chunk_index})...")
+        raw_output_path = None
+        if is_t1:
+            raw_output_path = os.path.join(experiment_dir, f"chunk_{chunk_index:04d}.json")
         chunk_items = generate_chzzk_timeline(
             input_script=chunk_transcription_text,
             chat_script=compressed_chat_data,
@@ -381,7 +408,20 @@ def run_pure_test(timeline_only=False):
             target_streamer=target_streamer,
             target_channel_id=target_channel_id,
             streamer_profile_context=streamer_profile_context,
+            prompt_profile_path=prompt_profile_path,
+            raw_output_path=raw_output_path,
         )
+
+        if is_t1:
+            experiment_chunks.append({
+                "chunk_index": chunk_index,
+                "start_sec": current_chunk_start,
+                "end_sec": current_chunk_end,
+                "stt_sha256": _sha256_text(chunk_transcription_text),
+                "chat_sha256": _sha256_text(compressed_chat_data),
+                "raw_output_path": os.path.abspath(raw_output_path),
+                "item_count": len(chunk_items or []),
+            })
 
         if chunk_items:
             all_raw_items.extend(chunk_items)
@@ -425,10 +465,30 @@ def run_pure_test(timeline_only=False):
     final_timeline_string = "\n".join(cleaned_final_lines)
     start_label = format_time_label(global_start_sec)
     end_label = format_time_label(global_end_sec)
-    output_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}.txt"
+    output_suffix = "_t1" if is_t1 else ""
+    output_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}{output_suffix}.txt"
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_timeline_string)
+
+    metadata_path = None
+    if is_t1:
+        metadata_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}_t1.metadata.json"
+        metadata = {
+            "experiment": "t1",
+            "vod_id": str(vod_id),
+            "title": actual_title,
+            "start_sec": global_start_sec,
+            "end_sec": global_end_sec,
+            "model": CODEX_MODEL,
+            "prompt_profile_path": os.path.abspath(prompt_profile_path),
+            "prompt_profile_sha256": _sha256_file(prompt_profile_path),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "output_path": os.path.abspath(output_path),
+            "chunks": experiment_chunks,
+        }
+        with open(metadata_path, "w", encoding="utf-8") as metadata_file:
+            json.dump(metadata, metadata_file, ensure_ascii=False, indent=2)
 
     try:
         os.startfile(os.path.abspath(output_path))
@@ -443,6 +503,8 @@ def run_pure_test(timeline_only=False):
     print(final_timeline_string)
     print("=========================================================================")
     print(f"💾 최종 타임라인 결과 파일이 '{output_path}'로 안전하게 출력되었습니다!")
+    if metadata_path:
+        print(f"🧾 T1 실험 메타데이터가 '{metadata_path}'에 저장되었습니다.")
 
     timeline_len = len(final_timeline_string)
     print(f"\n📊 현재 생성된 타임라인 글자 수: {timeline_len}자 / 5000자")
@@ -462,10 +524,11 @@ if __name__ == "__main__":
     print("=========================================================================")
     print(" [1] 새 재료를 준비하고 타임라인 파일 생성하기")
     print(" [2] 준비된 재료로 타임라인만 다시 만들기")
+    print(" [4] 준비된 재료로 T1 재미 rubric 실험하기 (옵션)")
     print(" [3] 기존 타임라인 초안을 열어 수정하기")
     print("-------------------------------------------------------------------------")
 
-    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2 또는 3): ").strip()
+    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2, 3 또는 4): ").strip()
 
     if menu == "1":
         run_pure_test()
@@ -473,5 +536,7 @@ if __name__ == "__main__":
         run_pure_test(timeline_only=True)
     elif menu == "3":
         process_direct_comment_mode()
+    elif menu == "4":
+        run_pure_test(timeline_only=True, experiment_mode="t1")
     else:
         print("❌ 올바른 선택이 아닙니다. 프로그램을 종료합니다.")

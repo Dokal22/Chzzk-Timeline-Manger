@@ -1499,6 +1499,8 @@ def generate_chzzk_timeline(
     target_streamer="",
     target_channel_id="",
     streamer_profile_context=None,
+    prompt_profile_path=None,
+    raw_output_path=None,
 ):
     chzzk_url = sanitize_chzzk_url(chzzk_url)
 
@@ -1573,6 +1575,10 @@ def generate_chzzk_timeline(
     if os.path.exists(prompt_path):
         with open(prompt_path, "r", encoding="utf-8") as f:
             system_prompt_content += "\n=====[추가 편집 지침]=====\n" + f.read() + "\n"
+
+    if prompt_profile_path:
+        with open(prompt_profile_path, "r", encoding="utf-8") as f:
+            system_prompt_content += "\n=====[선택형 실험 편집 지침]=====\n" + f.read() + "\n"
 
     collab_member_reference = ""
     if use_collab_member_reference:
@@ -1651,7 +1657,18 @@ def generate_chzzk_timeline(
 
     if not response_json_text:
         print("❌ 자동 최대 재시도 임계값 초과로 해당 청크구간을 건너뜜.")
+        if raw_output_path:
+            output_dir = os.path.dirname(os.path.abspath(raw_output_path))
+            os.makedirs(output_dir, exist_ok=True)
+            with open(raw_output_path, "w", encoding="utf-8") as raw_file:
+                raw_file.write("")
         return []
+
+    if raw_output_path:
+        output_dir = os.path.dirname(os.path.abspath(raw_output_path))
+        os.makedirs(output_dir, exist_ok=True)
+        with open(raw_output_path, "w", encoding="utf-8") as raw_file:
+            raw_file.write(response_json_text)
 
     raw_items = []
 
