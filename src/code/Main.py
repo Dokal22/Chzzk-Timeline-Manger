@@ -186,8 +186,14 @@ def load_prepared_timeline_materials(vod_id):
     full_script_path = os.path.join(
         os.getcwd(), "voicepalette", f"VOD_{vod_id}", "full_raw_script.txt"
     )
-    full_chat_path = os.path.join(
-        os.getcwd(), "chat_cache", str(vod_id), f"chat_{vod_id}_full.txt"
+    chat_cache_dir = os.path.join(os.getcwd(), "chat_cache", str(vod_id))
+    full_chat_candidates = (
+        os.path.join(chat_cache_dir, f"chat_{vod_id}_full_dualspike_v1.txt"),
+        os.path.join(chat_cache_dir, f"chat_{vod_id}_full.txt"),
+    )
+    full_chat_path = next(
+        (path for path in full_chat_candidates if os.path.isfile(path)),
+        full_chat_candidates[0],
     )
 
     missing_materials = []
@@ -232,6 +238,24 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _dedupe_experiment_items(items):
+    """Remove exact/normalized duplicates introduced by T2's two passes."""
+    seen = set()
+    deduped = []
+    for item in items:
+        key = (
+            int(item.get("seconds", 0)),
+            re.sub(r"\s+", "", str(item.get("group_large", ""))).casefold(),
+            re.sub(r"\s+", "", str(item.get("topic", ""))).casefold(),
+            re.sub(r"\s+", "", str(item.get("content", ""))).casefold(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def run_pure_test(timeline_only=False, experiment_mode=None):
     print("\n-------------------------------------------------------------------------")
     print("🤖 AI 기반 새 VOD 타임라인 생성 및 추출 모드 시작")
@@ -240,10 +264,20 @@ def run_pure_test(timeline_only=False, experiment_mode=None):
     TARGET_CHANNEL_ID = CONFIG.get("TARGET_CHANNEL_ID")
     CODEX_MODEL = CONFIG.get("CODEX_MODEL", "")
     WHISPER_MODEL = CONFIG.get("WHISPER_MODEL", "base")
-    is_t1 = str(experiment_mode or "").strip().lower() == "t1"
-    prompt_profile_path = os.path.abspath("prompt_t1.txt") if is_t1 else None
-    if is_t1 and not os.path.isfile(prompt_profile_path):
-        print(f"❌ T1 프롬프트 프로필을 찾지 못했습니다: {prompt_profile_path}")
+    experiment_mode = str(experiment_mode or "").strip().lower()
+    is_t1 = experiment_mode == "t1"
+    is_t2 = experiment_mode == "t2"
+    prompt_profile_paths = {}
+    if is_t1:
+        prompt_profile_paths["t1"] = os.path.abspath("prompt_t1.txt")
+    elif is_t2:
+        prompt_profile_paths = {
+            "summary": os.path.abspath("prompt_t2_summary.txt"),
+            "highlight": os.path.abspath("prompt_t2_highlight.txt"),
+        }
+    missing_profiles = [path for path in prompt_profile_paths.values() if not os.path.isfile(path)]
+    if missing_profiles:
+        print(f"❌ 실험 프롬프트 프로필을 찾지 못했습니다: {', '.join(missing_profiles)}")
         return
 
     try:
@@ -356,8 +390,9 @@ def run_pure_test(timeline_only=False, experiment_mode=None):
     CHUNK_SIZE_SECS = 3600
     all_raw_items = []
     experiment_chunks = []
-    experiment_dir = os.path.join(os.getcwd(), "experiment_artifacts", "t1") if is_t1 else None
-    if is_t1:
+    is_experiment = is_t1 or is_t2
+    experiment_dir = os.path.join(os.getcwd(), "experiment_artifacts", experiment_mode) if is_experiment else None
+    if is_experiment:
         os.makedirs(experiment_dir, exist_ok=True)
 
     current_chunk_start = global_start_sec
@@ -393,44 +428,73 @@ def run_pure_test(timeline_only=False, experiment_mode=None):
             pass
 
         print(f"🚀 Codex 구독 모델 호출 중 (청크 인덱스: {chunk_index})...")
-        raw_output_path = None
+        pass_specs = [("legacy", None)]
         if is_t1:
-            raw_output_path = os.path.join(experiment_dir, f"chunk_{chunk_index:04d}.json")
-        chunk_items = generate_chzzk_timeline(
-            input_script=chunk_transcription_text,
-            chat_script=compressed_chat_data,
-            actual_title=actual_title,
-            chzzk_url=full_vod_url,
-            codex_model=CODEX_MODEL,
-            chunk_index=chunk_index,
-            use_collab_member_reference=use_collab_member_reference,
-            reference_context=reference_context,
-            target_streamer=target_streamer,
-            target_channel_id=target_channel_id,
-            streamer_profile_context=streamer_profile_context,
-            prompt_profile_path=prompt_profile_path,
-            raw_output_path=raw_output_path,
-        )
+            pass_specs = [("t1", prompt_profile_paths["t1"])]
+        elif is_t2:
+            pass_specs = [
+                ("summary", prompt_profile_paths["summary"]),
+                ("highlight", prompt_profile_paths["highlight"]),
+            ]
 
-        if is_t1:
-            experiment_chunks.append({
+        chunk_passes = []
+        for pass_name, profile_path in pass_specs:
+            raw_output_path = None
+            if is_experiment:
+                raw_filename = (
+                    f"chunk_{chunk_index:04d}.json"
+                    if is_t1 else f"chunk_{chunk_index:04d}_{pass_name}.json"
+                )
+                raw_output_path = os.path.join(experiment_dir, raw_filename)
+            chunk_items = generate_chzzk_timeline(
+                input_script=chunk_transcription_text,
+                chat_script=compressed_chat_data,
+                actual_title=actual_title,
+                chzzk_url=full_vod_url,
+                codex_model=CODEX_MODEL,
+                chunk_index=chunk_index,
+                use_collab_member_reference=use_collab_member_reference,
+                reference_context=reference_context,
+                target_streamer=target_streamer,
+                target_channel_id=target_channel_id,
+                streamer_profile_context=streamer_profile_context,
+                prompt_profile_path=profile_path,
+                raw_output_path=raw_output_path,
+            )
+            if chunk_items:
+                all_raw_items.extend(chunk_items)
+            if is_experiment:
+                chunk_passes.append({
+                    "pass": pass_name,
+                    "prompt_profile_path": os.path.abspath(profile_path),
+                    "raw_output_path": os.path.abspath(raw_output_path),
+                    "item_count": len(chunk_items or []),
+                })
+
+        if is_experiment:
+            chunk_record = {
                 "chunk_index": chunk_index,
                 "start_sec": current_chunk_start,
                 "end_sec": current_chunk_end,
                 "stt_sha256": _sha256_text(chunk_transcription_text),
                 "chat_sha256": _sha256_text(compressed_chat_data),
-                "raw_output_path": os.path.abspath(raw_output_path),
-                "item_count": len(chunk_items or []),
-            })
-
-        if chunk_items:
-            all_raw_items.extend(chunk_items)
+                "passes": chunk_passes,
+            }
+            if is_t1:
+                chunk_record.update({
+                    "raw_output_path": chunk_passes[0]["raw_output_path"],
+                    "item_count": chunk_passes[0]["item_count"],
+                })
+            experiment_chunks.append(chunk_record)
 
         current_chunk_start = current_chunk_end
 
     if not all_raw_items:
         print("❌ Codex가 정상적인 타임라인 항목 뼈대를 생성하지 못했습니다.")
         return
+
+    if is_t2:
+        all_raw_items = _dedupe_experiment_items(all_raw_items)
 
     # 1. 1차 취합 데이터 문자열 빌드
     final_output_text = merge_and_format_final_timeline(all_raw_items)
@@ -465,28 +529,36 @@ def run_pure_test(timeline_only=False, experiment_mode=None):
     final_timeline_string = "\n".join(cleaned_final_lines)
     start_label = format_time_label(global_start_sec)
     end_label = format_time_label(global_end_sec)
-    output_suffix = "_t1" if is_t1 else ""
+    output_suffix = "_t1" if is_t1 else ("_t2" if is_t2 else "")
     output_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}{output_suffix}.txt"
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_timeline_string)
 
     metadata_path = None
-    if is_t1:
-        metadata_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}_t1.metadata.json"
+    if is_experiment:
+        metadata_path = f"TL_VOD_{vod_id}_{start_label}_{end_label}_{experiment_mode}.metadata.json"
+        profile_metadata = (
+            {"prompt_profile_path": os.path.abspath(prompt_profile_paths["t1"]),
+             "prompt_profile_sha256": _sha256_file(prompt_profile_paths["t1"])}
+            if is_t1 else
+            {"prompt_profiles": {
+                name: {"path": os.path.abspath(path), "sha256": _sha256_file(path)}
+                for name, path in prompt_profile_paths.items()
+            }}
+        )
         metadata = {
-            "experiment": "t1",
+            "experiment": experiment_mode,
             "vod_id": str(vod_id),
             "title": actual_title,
             "start_sec": global_start_sec,
             "end_sec": global_end_sec,
             "model": CODEX_MODEL,
-            "prompt_profile_path": os.path.abspath(prompt_profile_path),
-            "prompt_profile_sha256": _sha256_file(prompt_profile_path),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "output_path": os.path.abspath(output_path),
             "chunks": experiment_chunks,
         }
+        metadata.update(profile_metadata)
         with open(metadata_path, "w", encoding="utf-8") as metadata_file:
             json.dump(metadata, metadata_file, ensure_ascii=False, indent=2)
 
@@ -504,7 +576,7 @@ def run_pure_test(timeline_only=False, experiment_mode=None):
     print("=========================================================================")
     print(f"💾 최종 타임라인 결과 파일이 '{output_path}'로 안전하게 출력되었습니다!")
     if metadata_path:
-        print(f"🧾 T1 실험 메타데이터가 '{metadata_path}'에 저장되었습니다.")
+        print(f"🧾 {experiment_mode.upper()} 실험 메타데이터가 '{metadata_path}'에 저장되었습니다.")
 
     timeline_len = len(final_timeline_string)
     print(f"\n📊 현재 생성된 타임라인 글자 수: {timeline_len}자 / 5000자")
@@ -526,9 +598,10 @@ if __name__ == "__main__":
     print(" [2] 준비된 재료로 타임라인만 다시 만들기")
     print(" [4] 준비된 재료로 T1 재미 rubric 실험하기 (옵션)")
     print(" [3] 기존 타임라인 초안을 열어 수정하기")
+    print(" [5] 준비된 재료로 T2 summary/highlight 분리 실험하기 (옵션)")
     print("-------------------------------------------------------------------------")
 
-    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2, 3 또는 4): ").strip()
+    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2, 3, 4 또는 5): ").strip()
 
     if menu == "1":
         run_pure_test()
@@ -538,5 +611,7 @@ if __name__ == "__main__":
         process_direct_comment_mode()
     elif menu == "4":
         run_pure_test(timeline_only=True, experiment_mode="t1")
+    elif menu == "5":
+        run_pure_test(timeline_only=True, experiment_mode="t2")
     else:
         print("❌ 올바른 선택이 아닙니다. 프로그램을 종료합니다.")

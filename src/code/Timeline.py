@@ -1596,7 +1596,10 @@ def generate_chzzk_timeline(
         f"{collab_member_reference}"
         f"🚨 [강제 제약 사항]: 소주제(topic)에는 위 목록에 있는 인물을 포함하여 그 어떤 사람의 닉네임도 적지 마십시오.\n\n"
         f"[오디오 STT 데이터 원본]\n{input_script}\n\n"
-        f"[시청자 실시간 채팅 데이터 원본]\n{chat_script}"
+        "[시청자 실시간 채팅 데이터 원본]\n"
+        "채팅 앞의 🔥는 전체 VOD 평균 대비 많은 구간, ⚡Z=값은 직전 10개 10초 구간 대비 국소 Z-score 급증 신호입니다. "
+        "두 표시는 참고 신호이며 재미나 사건의 증거로 단정하지 말고 STT와 실제 메시지 내용을 함께 판단하십시오.\n"
+        f"{chat_script}"
     )
 
     if streamer_profile.strip():

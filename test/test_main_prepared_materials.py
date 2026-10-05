@@ -85,6 +85,16 @@ class PreparedTimelineMaterialsTest(unittest.TestCase):
         self.assertEqual(754, self.main.parse_time_input("12:34"))
         self.assertEqual(3723, self.main.parse_time_input("01:02:03"))
 
+    def test_t2_adapter_removes_only_normalized_exact_duplicates(self):
+        items = [
+            {"seconds": 10, "group_large": "게임 방송", "topic": "전투", "content": "적 처치"},
+            {"seconds": 10, "group_large": "게임  방송", "topic": "전투", "content": " 적   처치 "},
+            {"seconds": 11, "group_large": "게임 방송", "topic": "전투", "content": "적 처치"},
+        ]
+        result = self.main._dedupe_experiment_items(items)
+        self.assertEqual(2, len(result))
+        self.assertEqual([10, 11], [item["seconds"] for item in result])
+
     def test_rejects_invalid_time_components(self):
         for invalid_value in ("90", "1:60", "00:00:60", "aa:bb"):
             with self.subTest(invalid_value=invalid_value):

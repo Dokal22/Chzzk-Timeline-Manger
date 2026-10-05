@@ -218,7 +218,9 @@ def download_chzzk_vod_chats(video_no, start_sec, end_sec):
     cache_dir = os.path.join(os.getcwd(), "chat_cache", str(video_no))
     os.makedirs(cache_dir, exist_ok=True)
     
-    full_cache_filename = f"chat_{video_no}_full.txt"
+    # Version the cache because the rolling Z-score signal changes which chat
+    # blocks receive extra samples and annotations. Keep older caches intact.
+    full_cache_filename = f"chat_{video_no}_full_dualspike_v1.txt"
     full_cache_path = os.path.join(cache_dir, full_cache_filename)
     
     if not os.path.exists(full_cache_path):
@@ -281,6 +283,27 @@ def download_chzzk_vod_chats(video_no, start_sec, end_sec):
         total_blocks = len(time_blocks)
         total_chats_count = sum(len(chats) for chats in time_blocks.values())
         avg_chats_per_block = total_chats_count / total_blocks if total_blocks > 0 else 1
+
+        # Keep the existing whole-VOD signal and calculate a second local
+        # signal over consecutive 10-second buckets. Missing buckets count as
+        # zero, and each baseline excludes the current bucket.
+        max_block_idx = max(time_blocks)
+        block_counts = [len(time_blocks.get(idx, ())) for idx in range(max_block_idx + 1)]
+        local_z_scores = {}
+        local_spikes = set()
+        lag_windows = 10
+        z_threshold = 3.0
+        for block_idx, current_count in enumerate(block_counts):
+            baseline = block_counts[max(0, block_idx - lag_windows):block_idx]
+            if len(baseline) < 2:
+                continue
+            baseline_mean = sum(baseline) / len(baseline)
+            baseline_variance = sum((count - baseline_mean) ** 2 for count in baseline) / len(baseline)
+            baseline_std = baseline_variance ** 0.5
+            z_score = (current_count - baseline_mean) / baseline_std if baseline_std > 0 else 0.0
+            local_z_scores[block_idx] = z_score
+            if z_score >= z_threshold:
+                local_spikes.add(block_idx)
         
         compressed_lines = []
         consecutive_laugh_count = 0
@@ -290,7 +313,8 @@ def download_chzzk_vod_chats(video_no, start_sec, end_sec):
             block_firepower = len(chats_in_block)
             
             is_high_tension = block_firepower > (avg_chats_per_block * 1.5)
-            sample_size = 3 if is_high_tension else 1
+            is_local_spike = block_idx in local_spikes
+            sample_size = 3 if (is_high_tension or is_local_spike) else 1
             
             unique_chats = []
             seen_messages = set()
@@ -323,7 +347,10 @@ def download_chzzk_vod_chats(video_no, start_sec, end_sec):
                 h = sec // 3600
                 m = (sec % 3600) // 60
                 s = sec % 60
-                tension_tag = " 🔥" if is_high_tension and unique_chats.index((sec, msg)) == 0 else ""
+                is_first_sample = unique_chats.index((sec, msg)) == 0
+                tension_tag = " 🔥" if is_high_tension and is_first_sample else ""
+                if is_local_spike and is_first_sample:
+                    tension_tag += f" ⚡Z={local_z_scores[block_idx]:.2f}"
                 compressed_lines.append(f"[{h:02d}:{m:02d}:{s:02d}]{tension_tag} {msg}")
 
         final_compressed_chat = "\n".join(compressed_lines)
