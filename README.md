@@ -169,7 +169,11 @@ VOD를 선택한 뒤 퍼센트 대신 `MM:SS` 또는 `HH:MM:SS` 형식으로 분
 {
     "TARGET_CHANNEL_ID": "치지직_32자리_채널_해시값",
     "CODEX_MODEL": "",
+    "WHISPER_LANGUAGE": "ko",
     "WHISPER_MODEL": "base",
+    "DIARIZATION_ENABLED": false,
+    "DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1",
+    "DIARIZATION_DEVICE": "auto",
     "NAMUWIKI_PROFILE_ENABLED": false,
     "REFERENCE_ENABLED": false,
     "REFERENCE_DIR": "references",
@@ -216,6 +220,66 @@ VOD를 선택한 뒤 퍼센트 대신 `MM:SS` 또는 `HH:MM:SS` 형식으로 분
 
 * 빠른 테스트: `base`, `small`
 * 고품질 분석: `medium`, `turbo`
+
+일반 생성 모드에서 모델을 실행마다 선택할 수 있으며 Enter는 설정값을 씁니다.
+준비된 재료로 타임라인만 다시 만들 때는 STT 설정 질문을 건너뜁니다. 선택한
+모델·언어별 전사 결과는 별도 캐시에 저장되므로 옵션을 바꾸면 다시 전사합니다.
+
+## 선택형 화자 분리
+
+화자 분리를 켜면 pyannote가 발화 구간에 익명 `SPEAKER_00`, `SPEAKER_01` 등의
+표시를 붙입니다. 이 번호는 사람의 실명이나 스트리머 이름을 뜻하지 않습니다.
+여러 화자가 한 전사 구간에 비슷한 시간 동안 겹치면 `SPEAKER_MIXED`, 매칭되지
+않으면 `UNKNOWN`으로 표시합니다. 긴 VOD에서는 별도 분석 시간이 들며 GPU 메모리나
+CPU 자원을 사용합니다. 화자 분리는 FFmpeg로 오디오를 16 kHz mono 파형으로 디코딩해
+모델에 직접 전달하므로 Windows의 TorchCodec FFmpeg DLL 로딩을 우회합니다. 선택한
+분석 구간 전체를 파형으로 메모리에 올리므로 매우 긴 방송은 분석 범위를 좁혀 실행하는
+편이 좋습니다.
+
+기본 설치에는 화자 분리 라이브러리가 포함되지 않습니다. Python 3.10 이상 환경에서
+선택 기능용 패키지를 설치하고, Hugging Face에서 모델 이용 조건에 직접 동의한 뒤
+읽기 토큰을 프로젝트 루트 `.env`의 `HF_TOKEN` 항목이나 환경 변수에 설정하세요.
+`.env`는 Git에서 제외됩니다. 토큰을 `config.json`에 넣지 마세요.
+
+```powershell
+pip install -r requirements-diarization.txt
+```
+
+`DIARIZATION_DEVICE`는 `auto`(기본값), `cuda`, `cpu` 중 하나입니다. `auto`는
+PyTorch CUDA를 사용할 수 있으면 GPU를 선택하고, 아니면 CPU 선택 사유를 출력합니다.
+`cuda`는 CUDA 미지원 PyTorch 환경에서 VOD를 받기 전에 중단하며, GPU 이동/추론
+실패 시 CPU로 조용히 전환하지 않고 CPU 재시도 또는 중단을 묻습니다. CUDA를 쓰려면
+앱도 CUDA 지원 PyTorch가 설치된 동일한 Python 환경으로 실행해야 합니다.
+
+Windows에서 기존 전역 Python을 바꾸지 않고 전용 환경을 준비하려면 저장소 루트에서:
+
+```powershell
+py -3.12 -m venv .venv-gpu
+.\.venv-gpu\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-gpu\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv-gpu\Scripts\python.exe -m pip install -r requirements-diarization.txt
+.\.venv-gpu\Scripts\python.exe -m pip install --upgrade --force-reinstall torch==2.12.0 --index-url https://download.pytorch.org/whl/cu126
+.\.venv-gpu\Scripts\python.exe scripts\check_diarization_gpu.py
+```
+
+CUDA wheel을 설치한 같은 Python으로 앱을 실행하세요. 이후 `requirements.txt` 설치나
+업그레이드가 torch를 CPU wheel로 바꾸지 않았는지 진단 스크립트로 확인할 수 있습니다.
+이 저장소의 앱 진입점은 다음과 같습니다.
+
+```powershell
+.\.venv-gpu\Scripts\python.exe src\code\Main.py
+```
+
+프로젝트 루트 `.env` 파일 예시:
+
+```dotenv
+HF_TOKEN=hf_실제읽기토큰
+```
+
+또는 현재 PowerShell 창에만 적용하려면 `$env:HF_TOKEN = "hf_실제읽기토큰"`을 설정한 뒤 실행하세요.
+
+모델 다운로드/인증/추론이 실패하면 원인을 표시하고, 화자 구분 없이 계속할지
+선택할 수 있습니다. 실패한 diarization은 성공 캐시로 기록되지 않습니다.
 
 ---
 

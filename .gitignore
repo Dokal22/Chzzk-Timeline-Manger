@@ -2,6 +2,10 @@
 reference_cache/
 streamer_profiles/
 config.json
+.venv-gpu/
+.env
+.env.*
+!.env.example
 chat_cache/
 voicepalette/
 src/weights/

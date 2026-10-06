@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from yt_dlp import YoutubeDL
 from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional
+from asr_utils import decode_audio_to_pyannote_waveform, select_diarized_speaker
 
 REFERENCE_ALLOWED_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".url"}
 REFERENCE_MAX_FILES = 5
@@ -231,6 +232,36 @@ def timestamp_to_seconds(ts_str: str) -> int:
     elif len(parts) == 2:
         return int(parts[0]) * 60 + int(parts[1])
     return 0
+
+
+def load_hf_token(env_path=None):
+    """Read HF_TOKEN from the process environment, then the project .env file."""
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if token:
+        return token
+    env_path = env_path or os.path.join(PROJECT_ROOT, ".env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as env_file:
+            for line in env_file:
+                entry = line.strip()
+                if not entry or entry.startswith("#"):
+                    continue
+                if entry.startswith("export "):
+                    entry = entry[7:].lstrip()
+                key, separator, value = entry.partition("=")
+                if separator and key.strip() == "HF_TOKEN":
+                    value = value.strip()
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                        value = value[1:-1]
+                    value = value.strip()
+                    if value:
+                        # Make the token available to Hugging Face clients that
+                        # read process environment variables (e.g. model downloads).
+                        os.environ["HF_TOKEN"] = value
+                    return value
+    except OSError:
+        pass
+    return ""
 
 def seconds_to_timestamp(seconds: int) -> str:
     h = seconds // 3600
@@ -534,18 +565,147 @@ def download_chzzk_vod_audio(
     print("✅ 원본 TS 오디오 캐시 빌드가 영구 보관되었습니다.")
     return master_audio_ts
 
-def transcribe_chzzk_audio(
-    audio_path, target_path, model_size="base", timestamp_offset_sec=0
-):
-    if os.path.exists(target_path) and os.path.getsize(target_path) > 10:
-        print(f"✨ [STT 대본 캐시 적중] 이미 전사된 원본 전체 대본을 불러옵니다: {target_path}")
-        with open(target_path, "r", encoding="utf-8") as f:
-            return f.read()
+def resolve_diarization_device(device_policy="auto", torch_module=None, announce=True):
+    """Resolve auto/cuda/cpu for pyannote and fail closed for an explicit CUDA request."""
+    policy = str(device_policy or "auto").strip().lower()
+    if policy not in {"auto", "cuda", "cpu"}:
+        raise RuntimeError("DIARIZATION_DEVICE 값은 auto, cuda, cpu 중 하나여야 합니다.")
+    try:
+        if torch_module is None:
+            import torch as torch_module
+    except Exception as exc:
+        raise RuntimeError(
+            "화자 분리에 PyTorch를 불러올 수 없습니다. PyTorch 설치와 DLL 의존성을 확인하세요: "
+            f"{exc}"
+        ) from exc
 
-    print(f"\n🎙️ 2단계: Faster-Whisper AI 엔진 구동 ({model_size}) - 안전 분할 전사 시작...")
+    try:
+        cuda_available = bool(torch_module.cuda.is_available())
+    except Exception as exc:
+        raise RuntimeError(f"PyTorch CUDA 상태를 확인하지 못했습니다: {exc}") from exc
+    if policy == "cuda" and not cuda_available:
+        torch_version = getattr(torch_module, "__version__", "unknown")
+        cuda_build = getattr(getattr(torch_module, "version", None), "cuda", None)
+        raise RuntimeError(
+            "DIARIZATION_DEVICE=cuda 이지만 PyTorch에서 CUDA를 사용할 수 없습니다 "
+            f"(torch={torch_version}, CUDA build={cuda_build or 'CPU 전용'}). "
+            "앱을 CUDA 지원 PyTorch 환경에서 실행하거나 config.json에서 cpu/auto를 선택하세요."
+        )
+    selected = "cuda" if cuda_available and policy in {"auto", "cuda"} else "cpu"
+    if selected == "cuda" and announce:
+        try:
+            name = torch_module.cuda.get_device_name(0)
+        except Exception:
+            name = "NVIDIA CUDA GPU"
+        print(f"🚀 화자 분리 장치: CUDA ({name})")
+    elif policy == "auto" and announce:
+        print("ℹ️ 화자 분리 장치: CPU (PyTorch CUDA를 사용할 수 없어 자동 선택)")
+    elif announce:
+        print("ℹ️ 화자 분리 장치: CPU (config.json에서 명시)")
+    return selected, torch_module
+
+
+def validate_diarization_device(device_policy="auto"):
+    """Preflight CUDA policy before VOD selection/download or expensive STT."""
+    return resolve_diarization_device(device_policy, announce=False)[0]
+
+
+def _log_diarization_device(pipeline, selected_device, torch_module):
+    actual = getattr(pipeline, "device", None)
+    if actual is None:
+        actual = "unknown (pipeline API does not expose device)"
+    print(f"🔎 화자 분리 pipeline 장치 확인: {actual}; 요청 장치={selected_device}")
+    if selected_device == "cuda":
+        current = torch_module.cuda.current_device()
+        print(f"🖥️ CUDA 장치: {torch_module.cuda.get_device_name(current)}")
+
+
+def transcribe_chzzk_audio(
+    audio_path, target_path, model_size="base", timestamp_offset_sec=0,
+    language="ko", diarization_enabled=False,
+    diarization_model="pyannote/speaker-diarization-community-1",
+    diarization_device="auto",
+):
     if not os.path.exists(audio_path):
         print("❌ 분석할 오디오 파일이 존재하지 않습니다.")
         return ""
+
+    os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+    audio_stat = os.stat(audio_path)
+    cache_options = {
+        "schema": 2,
+        "audio": os.path.abspath(audio_path),
+        "audio_size": audio_stat.st_size,
+        "audio_mtime_ns": audio_stat.st_mtime_ns,
+        "timestamp_offset_sec": int(timestamp_offset_sec),
+        "model_size": model_size,
+        "language": language,
+        "beam_size": 1,
+        "vad_filter": True,
+        "diarization_enabled": bool(diarization_enabled),
+        "diarization_model": diarization_model if diarization_enabled else "",
+    }
+    cache_fingerprint = hashlib.sha256(
+        json.dumps(cache_options, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    cache_dir = target_path + ".asr_cache"
+    cached_script_path = os.path.join(cache_dir, cache_fingerprint + ".txt")
+    cached_meta_path = os.path.join(cache_dir, cache_fingerprint + ".json")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    def atomic_write(path, contents):
+        fd, temp_path = tempfile.mkstemp(prefix=".asr-", dir=os.path.dirname(os.path.abspath(path)))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                output.write(contents)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temp_path, path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    if os.path.isfile(cached_script_path) and os.path.isfile(cached_meta_path):
+        try:
+            with open(cached_meta_path, "r", encoding="utf-8") as meta_file:
+                cache_meta = json.load(meta_file)
+            with open(cached_script_path, "r", encoding="utf-8") as script_file:
+                cached_script = script_file.read()
+            digest = hashlib.sha256(cached_script.encode("utf-8")).hexdigest()
+            if (cache_meta.get("options") == cache_options and cached_script.strip()
+                    and cache_meta.get("script_sha256") == digest):
+                atomic_write(target_path, cached_script)
+                atomic_write(target_path + ".meta.json", json.dumps(
+                    {"fingerprint": cache_fingerprint, "options": cache_options,
+                     "script_sha256": digest}, ensure_ascii=False, indent=2))
+                print(f"✨ [STT 캐시 적중] 모델={model_size}, 언어={language}, 화자 분리={bool(diarization_enabled)}")
+                return cached_script
+        except (OSError, ValueError, TypeError):
+            print("⚠️ STT 캐시 정보가 손상되어 다시 전사합니다.")
+
+    selected_diarization_device = "cpu"
+    torch = None
+    if diarization_enabled:
+        selected_diarization_device, torch = resolve_diarization_device(diarization_device)
+
+    # Load a project .env token before either ASR or diarization contacts the Hub.
+    hf_token = load_hf_token()
+    diarization_pipeline = None
+    if diarization_enabled:
+        if not hf_token:
+            raise RuntimeError("화자 분리에 HF_TOKEN이 필요합니다. 프로젝트 루트 .env 또는 환경 변수에 설정하세요.")
+        try:
+            from pyannote.audio import Pipeline
+        except ImportError as exc:
+            raise RuntimeError("화자 분리 선택 패키지가 없습니다. requirements-diarization.txt를 설치하세요.") from exc
+        try:
+            diarization_pipeline = Pipeline.from_pretrained(
+                diarization_model, token=hf_token
+            )
+        except Exception as exc:
+            raise RuntimeError(f"화자 분리 모델을 불러오지 못했습니다: {exc}") from exc
+
+    print(f"\n🎙️ 2단계: Faster-Whisper AI 엔진 구동 ({model_size}, {language}) - 안전 분할 전사 시작...")
 
     ffmpeg_bin = FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else "ffmpeg"
     specific_palette_dir = os.path.dirname(target_path)
@@ -597,54 +757,107 @@ def transcribe_chzzk_audio(
         print("❌ faster-whisper 라이브러리가 설치되어 있지 않습니다.")
         return ""
 
+    transcript_segments = []
+
+    try:
+        for idx, chunk_file in enumerate(chunk_files):
+            if os.path.getsize(chunk_file) < 1024:
+                continue
+
+            print(f"🎙️ [{idx+1}/{len(chunk_files)}] 청크 전사 연산 진행 중: {os.path.basename(chunk_file)}")
+            segments, info = model.transcribe(
+                chunk_file,
+                language=language,
+                beam_size=1,
+                best_of=1,
+                word_timestamps=False,
+                repetition_penalty=1.4,
+                compression_ratio_threshold=1.8,
+                temperature=0,
+                condition_on_previous_text=False,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=100),
+                no_speech_threshold=0.5,
+                log_prob_threshold=-1.0
+            )
+
+            for segment in segments:
+                text_content = segment.text.strip()
+                if text_content:
+                    transcript_segments.append((
+                        float(segment.start) + idx * chunk_length_sec,
+                        float(segment.end) + idx * chunk_length_sec,
+                        text_content,
+                    ))
+    finally:
+        for chunk_file in chunk_files:
+            try:
+                os.remove(chunk_file)
+            except OSError:
+                pass
+
+    del model
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    diarization_turns = []
+    if diarization_enabled:
+        try:
+            if selected_diarization_device == "cuda":
+                try:
+                    diarization_pipeline.to(torch.device("cuda"))
+                except Exception as device_error:
+                    raise RuntimeError(
+                        f"CUDA 장치로 화자 분리 모델을 옮기지 못했습니다. CPU 재시도 또는 분석 범위 축소가 필요합니다: {device_error}"
+                    ) from device_error
+            _log_diarization_device(diarization_pipeline, selected_diarization_device, torch)
+            waveform = decode_audio_to_pyannote_waveform(audio_path, ffmpeg_bin, torch)
+            if selected_diarization_device == "cuda":
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.synchronize()
+            inference_started = time.perf_counter()
+            diarization_output = diarization_pipeline({"waveform": waveform, "sample_rate": 16000})
+            if selected_diarization_device == "cuda":
+                torch.cuda.synchronize()
+            elapsed = time.perf_counter() - inference_started
+            print(f"⏱️ 화자 분리 추론 완료: {elapsed:.1f}초, 장치={selected_diarization_device}")
+            if selected_diarization_device == "cuda":
+                peak_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+                print(f"📊 화자 분리 CUDA 최대 할당 메모리: {peak_mb:.0f} MiB")
+            del waveform
+            annotation = getattr(diarization_output, "exclusive_speaker_diarization", None)
+            if annotation is None:
+                annotation = getattr(diarization_output, "speaker_diarization", diarization_output)
+            for turn, speaker in annotation:
+                diarization_turns.append((float(turn.start), float(turn.end), str(speaker)))
+            if not diarization_turns:
+                raise RuntimeError("모델이 화자 구간을 반환하지 않았습니다.")
+        except Exception as exc:
+            raise RuntimeError(f"화자 분리 실패: {exc}") from exc
+
     script_lines = []
-
-    for idx, chunk_file in enumerate(chunk_files):
-        if os.path.getsize(chunk_file) < 1024:
-            continue
-
-        current_offset_secs = timestamp_offset_sec + idx * chunk_length_sec
-        print(f"🎙️ [{idx+1}/{len(chunk_files)}] 청크 전사 연산 진행 중: {os.path.basename(chunk_file)}")
-
-        segments, info = model.transcribe(
-            chunk_file,
-            language="ko",
-            beam_size=1,
-            best_of=1,
-            word_timestamps=False,
-            repetition_penalty=1.4,
-            compression_ratio_threshold=1.8,
-            temperature=0,
-            condition_on_previous_text=False,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=500,
-                speech_pad_ms=100
-            ),
-            no_speech_threshold=0.5,
-            log_prob_threshold=-1.0
-        )
-
-        for segment in segments:
-            absolute_secs = max(0, int(segment.start) + current_offset_secs - 1)
-            h = absolute_secs // 3600
-            m = (absolute_secs % 3600) // 60
-            s = absolute_secs % 60
-
-            timestamp_str = f"[{h:02d}:{m:02d}:{s:02d}]"
-            text_content = segment.text.strip()
-
-            if text_content:
-                script_lines.append(f"{timestamp_str} {text_content}")
-                print(f"  {timestamp_str} {text_content}")
-
-    for chunk_file in chunk_files:
-        try: os.remove(chunk_file)
-        except: pass
+    for start_sec, end_sec, text_content in transcript_segments:
+        speaker_label = ""
+        if diarization_enabled:
+            speaker_label = select_diarized_speaker(start_sec, end_sec, diarization_turns)
+        absolute_secs = max(0, int(start_sec) + int(timestamp_offset_sec) - 1)
+        h, m, s = absolute_secs // 3600, (absolute_secs % 3600) // 60, absolute_secs % 60
+        timestamp_str = f"[{h:02d}:{m:02d}:{s:02d}]"
+        speaker_prefix = f"[{speaker_label}] " if speaker_label else ""
+        script_lines.append(f"{timestamp_str} {speaker_prefix}{text_content}")
+        print(f"  {timestamp_str} {speaker_prefix}{text_content}")
 
     raw_script = "\n".join(script_lines)
-    with open(target_path, "w", encoding="utf-8") as f:
-        f.write(raw_script)
+    digest = hashlib.sha256(raw_script.encode("utf-8")).hexdigest()
+    metadata = {"fingerprint": cache_fingerprint, "options": cache_options, "script_sha256": digest}
+    atomic_write(cached_script_path, raw_script)
+    atomic_write(cached_meta_path, json.dumps(metadata, ensure_ascii=False, indent=2))
+    atomic_write(target_path, raw_script)
+    atomic_write(target_path + ".meta.json", json.dumps(metadata, ensure_ascii=False, indent=2))
 
     print(f"✅ 원본 오프셋 전체 생대본 보관 완료! (보존 경로: {target_path})")
     return raw_script
@@ -2428,12 +2641,13 @@ def generate_chzzk_timeline(
 
     streamer_stt_list = []
     for line in input_script.split("\n"):
-        match = re.match(r"^\[(\d+:\d+:\d+)\]\s+(.*)$", line.strip())
+        match = re.match(r"^\[(\d+:\d+:\d+)\]\s+(?:\[SPEAKER_[^\]]+\]\s+)?(.*)$", line.strip())
         if match:
             streamer_stt_list.append((timestamp_to_seconds(match.group(1)), match.group(2).strip()))
 
     base_instruction = (
         "당신은 치지직/인방 다시보기 로그를 가공하는 유능한 유튜브 타임라인 전문 편집자입니다.\n\n"
+        "- 대본의 [SPEAKER_00] 등은 음성 구간 모델이 붙인 익명 화자 ID입니다. 실명이나 스트리머 정체로 추론하지 말고, 그 라벨이 붙은 발화를 구분하는 데만 사용하십시오. [SPEAKER_MIXED]는 복수 화자 경계가 섞인 구간이며 특정 인물에게 귀속하지 마십시오. [UNKNOWN]은 화자 미확정입니다.\n\n"
         "🚨 [가장 중요한 하이라이트 점수 책정 원칙 - 무조건적인 도입부 가점 배제]\n"
         "- 절대로 영상의 '시작 부분', '청크 파트의 도입부', 또는 특정 시간대([01:00:00], [02:00:00] 등)라는 단지 시간적 이유만으로 관성적인 가점을 주거나 '방송 시작', '오프닝' 등의 불필요한 타임라인 항목을 생성하지 마십시오.\n"
         "- 점수(wf, wi)는 오직 객관적인 재미와 내용의 중요도에 의해서만 엄격하게 결정됩니다. 시청자들의 챗 창 폭발력(ㅋㅋㅋ, ㄷㄷㄷ 등의 도배 밀도), 도네이션 유무, 스트리머의 리액션이 실제로 터진 지점만 높은 점수를 책정해야 합니다.\n"
