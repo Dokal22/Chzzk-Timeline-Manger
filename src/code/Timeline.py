@@ -2644,9 +2644,6 @@ def generate_chzzk_timeline(
         "특정 인물에게 귀속하지 마십시오. [UNKNOWN]은 화자 미확정입니다."
     )
 
-    system_prompt_content = base_instruction
-
-    system_prompt_content = PromptRegistry.compose("timeline", "", prompt_snapshot)
 
     collab_member_reference = ""
     if use_collab_member_reference:
