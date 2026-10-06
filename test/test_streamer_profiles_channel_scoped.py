@@ -23,9 +23,13 @@ def load_timeline_module():
     pydantic.Field = lambda *args, **kwargs: None
     sys.modules.setdefault("pydantic", pydantic)
     source = Path(__file__).parents[1] / "src" / "code" / "Timeline.py"
+    source_dir = str(source.parent)
+    sys.path.insert(0, source_dir)
     spec = importlib.util.spec_from_file_location("timeline_profile_scope", source)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if sys.path[0] == source_dir:
+        sys.path.pop(0)
     return module
 
 

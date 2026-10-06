@@ -1,0 +1,3 @@
+# Optional speaker diarization backend. Requires Python >= 3.10.
+# Install only when enabling DIARIZATION_ENABLED.
+pyannote.audio==4.0.7

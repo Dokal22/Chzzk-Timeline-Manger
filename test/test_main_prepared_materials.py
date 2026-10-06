@@ -26,6 +26,7 @@ def load_main_module():
         "correct_streamer_nicknames_with_codex",
         "ensure_codex_ready",
         "load_chzzk_streamers_raw_db",
+        "validate_diarization_device",
     ):
         setattr(timeline, name, lambda *args, **kwargs: None)
 
@@ -128,7 +129,7 @@ class PreparedTimelineMaterialsTest(unittest.TestCase):
                 mock.patch.object(self.main, "download_chzzk_vod_chats", return_value=""),
                 mock.patch.object(self.main, "timestamp_to_seconds", return_value=600),
                 mock.patch.object(self.main, "generate_chzzk_timeline", return_value=[]),
-                mock.patch("builtins.input", side_effect=("", "00:10:00", "00:20:00")),
+                mock.patch("builtins.input", side_effect=("", "n", "", "00:10:00", "00:20:00")),
             )
             previous_cwd = os.getcwd()
             try:
@@ -144,11 +145,74 @@ class PreparedTimelineMaterialsTest(unittest.TestCase):
             self.assertEqual(600, download_audio.call_args.kwargs["start_sec"])
             self.assertEqual(1200, download_audio.call_args.kwargs["end_sec"])
             self.assertEqual(600, transcribe.call_args.kwargs["timestamp_offset_sec"])
+            self.assertEqual("base", transcribe.call_args.kwargs["model_size"])
+            self.assertEqual("ko", transcribe.call_args.kwargs["language"])
+            self.assertFalse(transcribe.call_args.kwargs["diarization_enabled"])
             self.assertTrue(
                 transcribe.call_args.kwargs["target_path"].endswith(
                     os.path.join("VOD_123", "raw_script_600_1200.txt")
                 )
             )
+
+    def test_asr_options_accept_config_default_and_model_override(self):
+        config = {"WHISPER_MODEL": "base", "WHISPER_LANGUAGE": "ko", "DIARIZATION_ENABLED": False}
+        with mock.patch("builtins.input", side_effect=["", "y"]):
+            options = self.main.choose_asr_options(config)
+        self.assertEqual(("base", "ko", True, "pyannote/speaker-diarization-community-1"), options)
+
+        with mock.patch("builtins.input", side_effect=["medium", "n"]):
+            options = self.main.choose_asr_options(config)
+        self.assertEqual("medium", options[0])
+        self.assertFalse(options[2])
+
+    def test_asr_options_reprompt_invalid_model_and_diarization_answer(self):
+        config = {"WHISPER_MODEL": "base", "DIARIZATION_ENABLED": False}
+        with mock.patch("builtins.input", side_effect=["not-a-model", "turbo", "maybe", "n"]):
+            options = self.main.choose_asr_options(config)
+        self.assertEqual("turbo", options[0])
+        self.assertFalse(options[2])
+
+    def test_prepared_material_mode_does_not_prompt_or_change_options(self):
+        config = {"WHISPER_MODEL": "small", "WHISPER_LANGUAGE": "ko", "DIARIZATION_ENABLED": True}
+        with mock.patch("builtins.input", side_effect=AssertionError("must not prompt")):
+            options = self.main.choose_asr_options(config, timeline_only=True)
+        self.assertEqual(("small", "ko", True, "pyannote/speaker-diarization-community-1"), options)
+
+    def test_explicit_cuda_failure_stops_before_vod_or_audio_work(self):
+        with (
+            mock.patch.dict(self.main.CONFIG, {"DIARIZATION_DEVICE": "cuda"}, clear=True),
+            mock.patch.object(
+                self.main, "choose_asr_options",
+                return_value=("base", "ko", True, "pyannote/speaker-diarization-community-1"),
+            ),
+            mock.patch.object(
+                self.main, "validate_diarization_device",
+                side_effect=RuntimeError("CUDA 미지원 torch"),
+            ),
+            mock.patch.object(self.main, "ensure_codex_ready") as ensure_ready,
+            mock.patch.object(self.main, "select_chzzk_vod") as select_vod,
+            mock.patch.object(self.main, "download_chzzk_vod_audio") as download_audio,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.main.run_pure_test()
+        ensure_ready.assert_not_called()
+        select_vod.assert_not_called()
+        download_audio.assert_not_called()
+
+    def test_diarization_overlap_policy(self):
+        timeline_path = Path(__file__).parents[1] / "src" / "code" / "Timeline.py"
+        timeline_dir = str(timeline_path.parent)
+        sys.path.insert(0, timeline_dir)
+        try:
+            from asr_utils import select_diarized_speaker
+        finally:
+            if sys.path[0] == timeline_dir:
+                sys.path.pop(0)
+
+        turns = [(0.0, 1.0, "SPEAKER_00"), (1.0, 2.0, "SPEAKER_01")]
+        self.assertEqual("SPEAKER_00", select_diarized_speaker(0.0, 0.8, turns))
+        self.assertEqual("SPEAKER_MIXED", select_diarized_speaker(0.0, 2.0, turns))
+        self.assertEqual("UNKNOWN", select_diarized_speaker(3.0, 4.0, turns))
 
 
 if __name__ == "__main__":

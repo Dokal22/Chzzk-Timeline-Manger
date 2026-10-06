@@ -23,6 +23,7 @@ from Timeline import (
     correct_streamer_nicknames_with_codex,
     ensure_codex_ready,
     load_chzzk_streamers_raw_db,
+    validate_diarization_device,
 )
 
 try:
@@ -86,6 +87,52 @@ def format_time_label(total_seconds):
     minutes = (total_seconds % 3600) // 60
     seconds = total_seconds % 60
     return f"{hours:02d}-{minutes:02d}-{seconds:02d}"
+
+
+SUPPORTED_WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v3", "turbo")
+
+
+def choose_asr_options(config, timeline_only=False):
+    model = str(config.get("WHISPER_MODEL", "base") or "base").strip()
+    language = str(config.get("WHISPER_LANGUAGE", "ko") or "ko").strip()
+    raw_diarization_enabled = config.get("DIARIZATION_ENABLED", False)
+    if isinstance(raw_diarization_enabled, str):
+        diarization_enabled = raw_diarization_enabled.strip().lower() in {"1", "true", "yes", "y", "on"}
+    else:
+        diarization_enabled = bool(raw_diarization_enabled)
+    diarization_model = str(
+        config.get("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
+        or "pyannote/speaker-diarization-community-1"
+    ).strip()
+    if timeline_only:
+        return model, language, diarization_enabled, diarization_model
+
+    print("\n🎙️ 음성인식 모델 선택")
+    print("지원 모델: " + ", ".join(SUPPORTED_WHISPER_MODELS))
+    while True:
+        selected = input(f"모델 (Enter={model}): ").strip()
+        if not selected:
+            break
+        if selected in SUPPORTED_WHISPER_MODELS:
+            model = selected
+            break
+        print("지원 모델 중에서 선택해 주세요.")
+
+    default_label = "Y/n" if diarization_enabled else "y/N"
+    while True:
+        answer = input(
+            f"화자 분리 사용? ({default_label}, 모델={diarization_model}): "
+        ).strip().lower()
+        if not answer:
+            break
+        if answer in {"y", "yes", "예", "ㅇ"}:
+            diarization_enabled = True
+            break
+        if answer in {"n", "no", "아니오", "ㄴ"}:
+            diarization_enabled = False
+            break
+        print("y 또는 n으로 입력해 주세요.")
+    return model, language, diarization_enabled, diarization_model
 
 
 def ask_analysis_time_range(total_duration_secs):
@@ -239,7 +286,17 @@ def run_pure_test(timeline_only=False, prompt_snapshot=None):
 
     TARGET_CHANNEL_ID = CONFIG.get("TARGET_CHANNEL_ID")
     CODEX_MODEL = CONFIG.get("CODEX_MODEL", "")
-    WHISPER_MODEL = CONFIG.get("WHISPER_MODEL", "base")
+    WHISPER_MODEL, WHISPER_LANGUAGE, DIARIZATION_ENABLED, DIARIZATION_MODEL = choose_asr_options(
+        CONFIG, timeline_only=timeline_only
+    )
+    DIARIZATION_DEVICE = str(CONFIG.get("DIARIZATION_DEVICE", "auto") or "auto").strip().lower()
+    if DIARIZATION_ENABLED:
+        try:
+            validate_diarization_device(DIARIZATION_DEVICE)
+        except RuntimeError as device_error:
+            print(f"❌ 화자 분리 실행 환경을 사용할 수 없습니다: {device_error}")
+            return
+
     if configure_prompt_debug:
         configure_prompt_debug(CONFIG.get("PROMPT_DEBUG_MODE", "off"),
                                CONFIG.get("PROMPT_DEBUG_LINES", 10), os.getcwd())
@@ -344,12 +401,60 @@ def run_pure_test(timeline_only=False, prompt_snapshot=None):
         full_script_path = os.path.join(
             os.getcwd(), "voicepalette", f"VOD_{vod_id}", script_filename
         )
-        full_transcription = transcribe_chzzk_audio(
-            audio_path=master_audio_path,
-            target_path=full_script_path,
-            model_size=WHISPER_MODEL,
-            timestamp_offset_sec=global_start_sec,
-        )
+        try:
+            full_transcription = transcribe_chzzk_audio(
+                audio_path=master_audio_path,
+                target_path=full_script_path,
+                model_size=WHISPER_MODEL,
+                timestamp_offset_sec=global_start_sec,
+                language=WHISPER_LANGUAGE,
+                diarization_enabled=DIARIZATION_ENABLED,
+                diarization_model=DIARIZATION_MODEL,
+                diarization_device=DIARIZATION_DEVICE,
+            )
+        except RuntimeError as diarization_error:
+            if not DIARIZATION_ENABLED or not str(diarization_error).startswith("화자 분리"):
+                print(f"❌ 음성인식에 실패했습니다: {diarization_error}")
+                return
+            diarization_error_text = str(diarization_error)
+            # Drop traceback-held pyannote/GPU objects before offering a CPU retry.
+            diarization_error.__traceback__ = None
+            diarization_error.__cause__ = None
+            diarization_error.__context__ = None
+            del diarization_error
+            print(f"⚠️ 화자 분리를 완료하지 못했습니다: {diarization_error_text}")
+            while True:
+                fallback = input("[c] CPU로 화자 분리 재시도 / [y] 화자 구분 없이 진행 / [n] 중단 (기본=n): ").strip().lower()
+                if fallback in {"c", "cpu"}:
+                    try:
+                        full_transcription = transcribe_chzzk_audio(
+                            audio_path=master_audio_path,
+                            target_path=full_script_path,
+                            model_size=WHISPER_MODEL,
+                            timestamp_offset_sec=global_start_sec,
+                            language=WHISPER_LANGUAGE,
+                            diarization_enabled=True,
+                            diarization_model=DIARIZATION_MODEL,
+                            diarization_device="cpu",
+                        )
+                    except RuntimeError as retry_error:
+                        print(f"❌ CPU 재시도 실패: {retry_error}")
+                        return
+                    break
+                if fallback in {"y", "yes", "예", "ㅇ"}:
+                    full_transcription = transcribe_chzzk_audio(
+                        audio_path=master_audio_path,
+                        target_path=full_script_path,
+                        model_size=WHISPER_MODEL,
+                        timestamp_offset_sec=global_start_sec,
+                        language=WHISPER_LANGUAGE,
+                        diarization_enabled=False,
+                        diarization_device=DIARIZATION_DEVICE,
+                    )
+                    break
+                if fallback in {"", "n", "no", "아니오", "ㄴ"}:
+                    return
+                print("c, y 또는 n으로 입력해 주세요.")
     if not full_transcription.strip():
         print("❌ VOD 전체 대본(STT) 데이터가 유효하지 않거나 비어있습니다.")
         return
