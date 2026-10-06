@@ -12,11 +12,16 @@ import requests
 import socket
 import ipaddress
 import hashlib
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit, quote, unquote
 from datetime import datetime, timedelta
 from yt_dlp import YoutubeDL
 from pydantic import BaseModel, ConfigDict, Field
+from prompt_manager import PromptRegistry
+from prompt_defaults import DEFAULT_PROMPTS
+from prompt_research import ACTIVE_RECORDER
+from prompt_debug import debug_prompt_before_call
 from typing import List, Optional
 
 REFERENCE_ALLOWED_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".url"}
@@ -127,30 +132,12 @@ CHZZK_HEADERS = {
 class TimelineItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    group_large: str = Field(
-        description="방송 상황의 대분류이자 대주제 (예: 저스트 채팅, 게임 방송, 공지사항, 영도 시청 등)"
-    )
-    topic: str = Field(
-        description=(
-            "현재 시간대의 실제 구체적인 대화 주제나 진행 중인 콘텐츠/게임 이름 등의 소주제.\n"
-            "🚨 [중요 규칙]: 소주제 명칭에 합방 멤버, 디스코드 대화 참여자 등 다른 스트리머의 닉네임이나 이름, 혹은 관련 괄호 표기를 절대로 포함하지 마십시오.\n"
-            "오직 순수한 콘텐츠 명칭이나 게임 제목, 대화 주제만 깔끔하게 작성하십시오. (예: '배틀그라운드', '디스코드 잡담')"
-        )
-    )
+    group_large: str = Field(description="방송 상황의 대분류")
+    topic: str = Field(description="현재 장면의 콘텐츠 또는 대화 주제")
     timestamp: str = Field(description="[HH:MM:SS] 형식의 시간 축 지점")
-    wf: int = Field(description="순수 재미 점수 (0 ~ 50) - 시청자 채팅 반응 폭발 강도 및 도배 밀도 기준")
-    wi: int = Field(description="내용 중요 점수 (0 ~ 50) - 콘텐츠 전개상 핵심 사건 유무 기준")
-    content: str = Field(
-        description=(
-            "🚨 [시간 마이크로 매칭 및 스트리머 멘트 최우선 매칭 제약]:\n"
-            "1. 만약 특정 리액션이나 내용에 대해 시청자의 채팅 반응과 스트리머의 오디오 발언이 거의 동시에 일어났다면, "
-            "무조건 스트리머가 직접 말한 최초 발언 시점의 텍스트와 시간만을 기준으로 content를 작성하십시오.\n"
-            "2. 문장은 10~15자 내외로 극도로 짧고 간결해야 합니다. 구구절절한 설명 조나 나열식 문장은 절대 금지입니다.\n"
-            "3. 문장 끝은 깔끔한 명사 형태('~모습', '~이야기', '~리액션', '~인사')로 자연스럽게 끝맺음 하십시오.\n"
-            "4. 🚨 '모바', '포바' 같은 단어는 모바일 게임이나 포토가 아니라 닉네임 축약형 '작별/퇴근 인사말'입니다. 문맥을 파악하여 '인사 소통'이나 '방종 인사' 등으로 변환하여 출력하십시오.\n"
-            "5. 본문 내용 안에 단락 태그를 중복해서 절대 삽입하지 마십시오."
-        )
-    )
+    wf: int = Field(description="재미 점수 정수")
+    wi: int = Field(description="내용 중요도 점수 정수")
+    content: str = Field(description="타임라인 본문")
 
 class TimelineResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -2395,10 +2382,12 @@ def generate_chzzk_timeline(
     target_streamer="",
     target_channel_id="",
     streamer_profile_context=None,
+    prompt_snapshot=None,
 ):
     chzzk_url = sanitize_chzzk_url(chzzk_url)
+    if prompt_snapshot is None:
+        prompt_snapshot = PromptRegistry().snapshot()
 
-    prompt_path = os.path.join(os.getcwd(), "prompt.txt")
     streamers_db_path = "chzzk_streamers.txt"
 
     if streamer_profile_context is None:
@@ -2432,45 +2421,11 @@ def generate_chzzk_timeline(
         if match:
             streamer_stt_list.append((timestamp_to_seconds(match.group(1)), match.group(2).strip()))
 
-    base_instruction = (
-        "당신은 치지직/인방 다시보기 로그를 가공하는 유능한 유튜브 타임라인 전문 편집자입니다.\n\n"
-        "🚨 [가장 중요한 하이라이트 점수 책정 원칙 - 무조건적인 도입부 가점 배제]\n"
-        "- 절대로 영상의 '시작 부분', '청크 파트의 도입부', 또는 특정 시간대([01:00:00], [02:00:00] 등)라는 단지 시간적 이유만으로 관성적인 가점을 주거나 '방송 시작', '오프닝' 등의 불필요한 타임라인 항목을 생성하지 마십시오.\n"
-        "- 점수(wf, wi)는 오직 객관적인 재미와 내용의 중요도에 의해서만 엄격하게 결정됩니다. 시청자들의 챗 창 폭발력(ㅋㅋㅋ, ㄷㄷㄷ 등의 도배 밀도), 도네이션 유무, 스트리머의 리액션이 실제로 터진 지점만 높은 점수를 책정해야 합니다.\n"
-        "- 재미 점수가 낮거나 평범한 일상 소통, 단순 대기 화면 등 의미 없는 잡담 구간은 과감하게 타임라인 리스트에서 제외하거나 낮게 채점하십시오.\n\n"
-        "🚨 [시간 정밀 매칭 및 소주제 작성 절대 규칙]\n"
-        "- 대주제와 소주제는 각각 group_large와 topic 필드로 분리하고, content 안에 '[대주제; 소주제]' 헤더를 직접 삽입하지 마십시오.\n"
-        "- **🚨 [소주제 내 스트리머 닉네임 박제 절대 금지]**: 소주제(topic) 영역에는 합방 멤버나 디코 참여자 등의 스트리머 닉네임을 괄호 포함 어떠한 형태로도 적지 마십시오. 오직 순수한 콘텐츠 명칭이나 제목, 게임 이름만 명료하게 나타내야 합니다. 예시: '배틀그라운드', '디스코드 잡담' (절대 '배틀그라운드(스트리머)' 처럼 구성하지 마십시오.)\n"
-        "- **[의미론적 대사 시작점 매칭 제약]**:\n"
-        "  * 타임라인 대사나 상황을 분석할 때 스트리머가 내뱉은 불필요한 필러 워드(Filler word: 어, 음, 아, 그, 있잖아 등)나 말더듬 구간의 시간대는 완전히 배제하십시오.\n"
-        "  * 반드시 실질적인 핵심 의미나 본문 상황이 시작되는 첫 단어(명사, 동사 등 실제 단어)의 시작 오디오 시점을 기준으로 정확하게 타임스탬프 후보를 판단하십시오.\n"
-        "- **[문장 초압축 및 명사형 종결 절대 규칙]**:\n"
-        "  * 한눈에 들어오도록 각 라인의 content는 10~15자 내외로 극도로 짧게 작성하십시오.\n"
-        "  * 상황을 설명할 때 '~하는 모습', '~하는 중', '~함'과 같은 서술형 종결 어미를 절대 사용하지 말고, 명사 또는 명사구 형태로 간결하게 끝마치십시오.\n"
-        "  * 올바른 예시: '허접 상대 압살', '디코방 음질 불평', '적 처치 후 도발', '솔로 랭크 캐리 승리'\n"
-        "  * 잘못된 예시: '허접 상대 압살하는 모습', '디코방 음질이 안 좋다고 불평함', '적 처치하고 도발하는 중'\n"
-        "- **[내용 중복 금지]**: 각 아이템의 content 본문 내부에 단락 태그를 중복해서 절대 삽입하지 마십시오.\n\n"
-        "🚨 [과거 회상 및 썰 풀기 시점 분리 강력 제약]\n"
-        "- **현재 실제로 게임 화면을 켜고 플레이하는 것이 아니라, 과거에 있었던 합방이나 옛날 게임 플레이 일화를 단순 대화로 회상하거나 썰을 푸는 상황이라면 절대로 대주제를 '게임 방송'으로 잡지 마십시오.**\n"
-        "- 이 경우 대주제는 반드시 **'저스트 채팅'**으로 분류하고, 소주제는 **'과거 합방 언급 및 토크'** 혹은 **'지난 방송 회상 및 토크'** 형태로 상황에 맞게 명확히 분리하십시오.\n\n"
-        "🚨 [마스터 DB 기반 주어(닉네임) 유연성 제약]\n"
-        "- 타임라인 본문 내용(content)을 구성할 때, 막연하고 모호한 일반 명사인 '스트리머'라는 단어는 최대한 지양하십시오.\n"
-        "- 제공된 방송 진행 주인공 정보와 선택적으로 제공되는 합방 참여자 정보를 참고하여, 주체적으로 행동하거나 핵심 멘트를 친 인물이 누구인지 명확히 구별하십시오.\n"
-        "- 인물 식별이 필요하다고 판단되는 하이라이트 상황(단독 캐리, 솔로 플레이 에피소드 등)에서는 반드시 '주인공 스트리머 닉네임'을 주어로 명시하여 문장을 작성하되, 명사 형태로 끝맺으십시오. (예: '풍월량 솔로 캐리로 게임 승리')\n"
-        "- 다인 합방 또는 디스코드 소통 상황에서 특정 타 스트리머가 리액션을 주도했거나 티키타카가 발생한 경우, 해당 스트리머 목록 사전을 대조하여 대상 스트리머의 정식 닉네임을 주어로 명확히 지정하되, 이 역시 명사형으로 간결하게 작성하십시오. (예: '삼식의 갑작스러운 뇌절 리액션')"
-        "\n\n🚨 [공식 스트리머와 콘텐츠 페르소나 분리 규칙]\n"
-        "- [방송 진행 주인공 스트리머]는 치지직 채널의 공식 주인공이며 기본 주어입니다.\n"
-        "- 콘텐츠 페르소나는 특정 게임·서버·역할극 안에서만 사용하는 보조 정체성입니다. 공식 스트리머명을 전역적으로 페르소나명으로 치환하지 마십시오.\n"
-        "- 현재 청크의 VOD 제목·STT·채팅에 페르소나 활성화 근거가 있고, 개별 항목의 장면에도 근거가 있을 때만 content의 주어로 페르소나를 사용하십시오.\n"
-        "- 방송 공지, 기술 문제, 일반 소통, 다른 콘텐츠, 근거가 불명확한 장면은 공식 스트리머명을 사용하십시오.\n"
-        "- 프로필이나 참고자료에만 페르소나가 적혀 있다는 이유로 해당 페르소나의 사건을 생성하지 마십시오."
-    )
+    base_instruction = DEFAULT_PROMPTS["timeline"]
 
     system_prompt_content = base_instruction
 
-    if os.path.exists(prompt_path):
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            system_prompt_content += "\n=====[추가 편집 지침]=====\n" + f.read() + "\n"
+    system_prompt_content = PromptRegistry.compose("timeline", "", prompt_snapshot)
 
     collab_member_reference = ""
     if use_collab_member_reference:
@@ -2486,7 +2441,6 @@ def generate_chzzk_timeline(
         f"치지직 채널 ID: {target_channel_id}\n"
         f"🎯 [방송 진행 주인공 스트리머]: {target_streamer}\n"
         f"{collab_member_reference}"
-        f"🚨 [강제 제약 사항]: 소주제(topic)에는 위 목록에 있는 인물을 포함하여 그 어떤 사람의 닉네임도 적지 마십시오.\n\n"
         f"[오디오 STT 데이터 원본]\n{input_script}\n\n"
         f"[시청자 실시간 채팅 데이터 원본]\n{chat_script}"
     )
@@ -2527,16 +2481,21 @@ def generate_chzzk_timeline(
     response_json_text = ""
     time.sleep(1.5)
 
+    request_prompt = (
+        f"{system_prompt_content}\n\n=====[분석 대상 데이터]=====\n{user_content}\n\n"
+        "반드시 지정된 JSON 스키마에 맞는 결과만 반환하십시오. "
+        "파일을 읽거나 수정하거나 셸 명령을 실행하지 마십시오."
+    )
+    output_schema = TimelineResponse.model_json_schema()
+    debug_prompt_before_call("timeline", prompt_snapshot.get("timeline", []), request_prompt,
+                             codex_model, output_schema, request_id=f"chunk-{chunk_index}")
+    print(f"🚀 Codex 구독 모델 호출 중 (청크 인덱스: {chunk_index})...")
     for attempt in range(max_retries):
         try:
             response_json_text = run_codex(
-                prompt=(
-                    f"{system_prompt_content}\n\n=====[분석 대상 데이터]=====\n{user_content}\n\n"
-                    "반드시 지정된 JSON 스키마에 맞는 결과만 반환하십시오. "
-                    "파일을 읽거나 수정하거나 셸 명령을 실행하지 마십시오."
-                ),
+                prompt=request_prompt,
                 model=codex_model,
-                output_schema=TimelineResponse.model_json_schema(),
+                output_schema=output_schema,
             )
             if response_json_text:
                 break
@@ -2742,6 +2701,13 @@ def generate_chzzk_timeline(
                 "content": cleaned_content
             })
 
+    ACTIVE_RECORDER.record(
+        "timeline", user_content, request_prompt,
+        response_json_text, raw_items, model_requested=codex_model,
+        prompt_versions=[{"id": item["id"], "version": item["version"], "hash": PromptRegistry.digest(item["text"])}
+                         for item in (prompt_snapshot or {}).get("timeline", [])],
+        schema=output_schema,
+    )
     return raw_items
 
 def merge_and_format_final_timeline(all_processed_items: list) -> str:
@@ -2807,7 +2773,9 @@ def merge_and_format_final_timeline(all_processed_items: list) -> str:
 
     return "\n".join(final_output_lines)
 
-def correct_streamer_nicknames_with_codex(timeline_text: str, codex_model: str = "", db_filename="chzzk_streamers.txt") -> str:
+def correct_streamer_nicknames_with_codex(timeline_text: str, codex_model: str = "", db_filename="chzzk_streamers.txt", prompt_snapshot=None) -> str:
+    if prompt_snapshot is None:
+        prompt_snapshot = PromptRegistry().snapshot()
     streamers_db_content = load_chzzk_streamers_raw_db(db_filename)
 
     lines = timeline_text.split("\n")
@@ -2836,29 +2804,25 @@ def correct_streamer_nicknames_with_codex(timeline_text: str, codex_model: str =
 
     intermediate_text = "\n".join(processed_lines)
 
-    system_instruction = (
-        "당신은 인터넷 방송 다시보기 타임라인의 구조와 정합성을 검수하고 완성하는 최종 편집 총괄자입니다.\n\n"
-        "🚨 [소주제 닉네임 박제 전면 차단 지침]\n"
-        "1. 대괄호 내부의 소주제 영역(예: [대주제; 소주제])에 스트리머들의 닉네임이나 괄호 표현이 들어가 있다면 이를 완벽하게 제거하십시오.\n"
-        "2. 타임라인 본문 내용(content)에서 오타가 난 명칭은 참고 DB를 바탕으로 자연스럽게 교정할 수 있으나, 소주제 타이틀에는 어떠 한 인물명도 명시되어서는 안 됩니다.\n\n"
-        "🚨 [최종 타임라인 정제 제약 사항]\n"
-        "1. 제공되는 타임라인의 포맷 구조(대괄호, 시간 스탬프, 세미콜론)는 단 한 글자도 함부로 왜곡하거나 유실시키지 마십시오.\n"
-        "2. 방송이 시작된 지 1시간 이상 지난 파트([01:00:00] 이후) 지점 본문 영역에 '방송 시작', '오프닝 인사'와 같은 관성적인 표현이 유실되어 남아있다면, 문맥을 읽어 완전히 소거하거나 '방송 잡담 및 소통' 등으로 매끄럽게 어미를 정돈하십시오.\n"
-        "3. 마크다운 코드 블록 마크(```)는 절대 포함하지 말고 순수 타임라인 결과물 텍스트 데이터만 출력하십시오."
-    )
+    system_instruction = DEFAULT_PROMPTS["nickname_review"]
+    system_instruction = PromptRegistry.compose("nickname_review", "", prompt_snapshot)
 
     user_prompt = (
         f"===[치지직 스트리머 마스터 DB (참고 사전)]===\n{streamers_db_content}\n\n"
         f"===[교정 대상 타임라인 텍스트]===\n{intermediate_text}\n\n"
-        "위 타임라인 텍스트의 소주제 타이틀 영역에서 괄호 및 모든 닉네임 표기를 완벽히 제거하고 포맷을 깔끔하게 완성해 주세요."
+        "선택된 검수 지침과 출력 형식에 따라 타임라인을 검수하십시오."
+    )
+
+    request_prompt = (
+        f"{system_instruction}\n\n{user_prompt}\n\n"
+        "결과 텍스트만 반환하십시오. 파일을 읽거나 수정하거나 셸 명령을 실행하지 마십시오."
     )
 
     try:
+        debug_prompt_before_call("nickname_review", prompt_snapshot.get("nickname_review", []),
+                                 request_prompt, codex_model, request_id="final-review")
         corrected_text = run_codex(
-            prompt=(
-                f"{system_instruction}\n\n{user_prompt}\n\n"
-                "결과 텍스트만 반환하십시오. 파일을 읽거나 수정하거나 셸 명령을 실행하지 마십시오."
-            ),
+            prompt=request_prompt,
             model=codex_model,
         )
         if corrected_text:
@@ -2867,7 +2831,14 @@ def correct_streamer_nicknames_with_codex(timeline_text: str, codex_model: str =
                 if line.strip().startswith("[") and ";" in line and line.strip().endswith("]"):
                     line = re.sub(r"\s*\([^)]+\)", "", line)
                 final_lines.append(line)
-            return "\n".join(final_lines)
+            cleaned = "\n".join(final_lines)
+            ACTIVE_RECORDER.record(
+                "nickname_review", intermediate_text, request_prompt,
+                corrected_text, cleaned, model_requested=codex_model,
+                prompt_versions=[{"id": item["id"], "version": item["version"], "hash": PromptRegistry.digest(item["text"])}
+                                 for item in (prompt_snapshot or {}).get("nickname_review", [])],
+            )
+            return cleaned
     except Exception as e:
         print(f"⚠️ [Codex 연산 실패] AI 검수 중 오류가 발생하여 1차 구조 정리본을 반환합니다: {e}")
 

@@ -34,6 +34,21 @@ except ImportError:
     def prepare_streamer_profile(target_channel_id="", target_streamer="", **kwargs):
         return target_streamer, ""
 
+try:
+    from prompt_manager import PromptRegistry, open_prompt_editor, edit_prompts_console
+except ImportError:
+    PromptRegistry = None
+    open_prompt_editor = None
+    edit_prompts_console = None
+try:
+    from prompt_research import ACTIVE_RECORDER
+except ImportError:
+    ACTIVE_RECORDER = None
+try:
+    from prompt_debug import configure_prompt_debug
+except ImportError:
+    configure_prompt_debug = None
+
 def parse_chat_timestamp_to_secs(chat_line):
     match = re.match(r"^\[(\d{2}):(\d{2}):(\d{2})\]", chat_line)
     if match:
@@ -217,7 +232,7 @@ def load_prepared_timeline_materials(vod_id):
     return full_transcription
 
 
-def run_pure_test(timeline_only=False):
+def run_pure_test(timeline_only=False, prompt_snapshot=None):
     print("\n-------------------------------------------------------------------------")
     print("🤖 AI 기반 새 VOD 타임라인 생성 및 추출 모드 시작")
     print("-------------------------------------------------------------------------")
@@ -225,6 +240,15 @@ def run_pure_test(timeline_only=False):
     TARGET_CHANNEL_ID = CONFIG.get("TARGET_CHANNEL_ID")
     CODEX_MODEL = CONFIG.get("CODEX_MODEL", "")
     WHISPER_MODEL = CONFIG.get("WHISPER_MODEL", "base")
+    if configure_prompt_debug:
+        configure_prompt_debug(CONFIG.get("PROMPT_DEBUG_MODE", "off"),
+                               CONFIG.get("PROMPT_DEBUG_LINES", 10), os.getcwd())
+    if prompt_snapshot is None and PromptRegistry:
+        try:
+            prompt_snapshot = PromptRegistry().snapshot()
+        except ValueError as exc:
+            print(f"❌ 프롬프트 선택을 확인해 주세요: {exc}")
+            return
 
     try:
         ensure_codex_ready()
@@ -259,6 +283,18 @@ def run_pure_test(timeline_only=False):
         return
     if not target_streamer:
         print("⚠️ 선택한 VOD에서 채널명을 확인하지 못해 주인공 스트리머명을 비워 둡니다.")
+
+    if ACTIVE_RECORDER:
+        research_choice = CONFIG.get("PROMPT_RESEARCH_ENABLED", False)
+        if isinstance(research_choice, str):
+            research_choice = research_choice.strip().lower() in {"y", "yes", "true", "1", "on"}
+        ACTIVE_RECORDER.start(
+            bool(research_choice),
+            vod_id=str(vod_id), title=actual_title, model_requested=CODEX_MODEL or "CLI default",
+            prompt_selection={stage: [item["id"] + ":v" + str(item["version"])
+                                for item in (prompt_snapshot or {}).get(stage, [])]
+                              for stage in ("timeline", "nickname_review")},
+        )
 
     namuwiki_profile_enabled = CONFIG.get("NAMUWIKI_PROFILE_ENABLED", False)
     if isinstance(namuwiki_profile_enabled, str):
@@ -371,7 +407,6 @@ def run_pure_test(timeline_only=False):
         except:
             pass
 
-        print(f"🚀 Codex 구독 모델 호출 중 (청크 인덱스: {chunk_index})...")
         chunk_items = generate_chzzk_timeline(
             input_script=chunk_transcription_text,
             chat_script=compressed_chat_data,
@@ -384,6 +419,7 @@ def run_pure_test(timeline_only=False):
             target_streamer=target_streamer,
             target_channel_id=target_channel_id,
             streamer_profile_context=streamer_profile_context,
+            prompt_snapshot=prompt_snapshot,
         )
 
         if chunk_items:
@@ -403,7 +439,8 @@ def run_pure_test(timeline_only=False):
     final_output_text = correct_streamer_nicknames_with_codex(
         timeline_text=final_output_text,
         codex_model=CODEX_MODEL,
-        db_filename="chzzk_streamers.txt"
+        db_filename="chzzk_streamers.txt",
+        prompt_snapshot=prompt_snapshot,
     )
 
     ai_notice = "🤖 이 댓글은 방송 하이라이트를 AI가 분석하여 생성한 타임라인으로 다소 부정확한 부분이 있을 수 있습니다."
@@ -466,9 +503,10 @@ if __name__ == "__main__":
     print(" [1] 새 재료를 준비하고 타임라인 파일 생성하기")
     print(" [2] 준비된 재료로 타임라인만 다시 만들기")
     print(" [3] 기존 타임라인 초안을 열어 수정하기")
+    print(" [4] 프롬프트 선택 및 편집")
     print("-------------------------------------------------------------------------")
 
-    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2 또는 3): ").strip()
+    menu = input("👉 원하시는 모드 번호를 선택하세요 (1, 2, 3 또는 4): ").strip()
 
     if menu == "1":
         run_pure_test()
@@ -476,5 +514,14 @@ if __name__ == "__main__":
         run_pure_test(timeline_only=True)
     elif menu == "3":
         process_direct_comment_mode()
+    elif menu == "4" and open_prompt_editor:
+        editor_result = open_prompt_editor()
+        if editor_result is None:
+            print("⚠️ GUI를 열지 못했습니다. 콘솔 프롬프트 편집으로 전환합니다.")
+            if edit_prompts_console and edit_prompts_console(): print("✅ 프롬프트 선택을 저장했습니다.")
+        elif editor_result:
+            print("✅ 프롬프트 선택을 적용했습니다.")
+        else:
+            print("프롬프트 설정을 취소했습니다.")
     else:
         print("❌ 올바른 선택이 아닙니다. 프로그램을 종료합니다.")

@@ -7,5 +7,8 @@
     "REFERENCE_ENABLED": false,
     "REFERENCE_DIR": "references",
     "REFERENCE_URLS": [],
-    "REFERENCE_CACHE_DIR": "reference_cache"
+    "REFERENCE_CACHE_DIR": "reference_cache",
+    "PROMPT_RESEARCH_ENABLED": false,
+    "PROMPT_DEBUG_MODE": "off",
+    "PROMPT_DEBUG_LINES": 10
 }

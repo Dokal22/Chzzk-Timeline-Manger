@@ -135,10 +135,10 @@ CLI 인터페이스 및 전체 실행 흐름 담당
 
 * 환경 설정 파일
 
-처음 설정할 때는 저장소의 [`config.example.json`](config.example.json)을
-`config.json`으로 복사한 뒤 값을 입력하세요. 예제에는 현재 `src/code`에서
-실제로 읽는 주요 설정이 포함되어 있습니다. 치지직 로그인 쿠키는 설정 파일에
-직접 넣지 않고, 가능한 경우 로그인한 브라우저에서 자동으로 찾습니다.
+저장소 루트의 [`config.example.json`](config.example.json)을 `config.json`으로
+복사하고 값을 입력하세요. 앱은 현재 작업 폴더의 `config.json`을 읽으므로 아래 실행
+명령도 저장소 루트에서 사용합니다. 치지직 로그인 쿠키는 설정 파일에 넣지 않고,
+가능한 경우 로그인한 브라우저에서 자동으로 찾습니다.
 
 ---
 
@@ -165,19 +165,18 @@ VOD를 선택한 뒤 퍼센트 대신 `MM:SS` 또는 `HH:MM:SS` 형식으로 분
 
 ## 예시
 
+전체 설정 예제는 저장소 루트의 [`config.example.json`](config.example.json)을
+복사해 사용하세요. 프롬프트 기능 관련 기본값은 아래와 같습니다.
+
 ```json
 {
-    "TARGET_CHANNEL_ID": "치지직_32자리_채널_해시값",
-    "CODEX_MODEL": "",
-    "WHISPER_MODEL": "base",
-    "NAMUWIKI_PROFILE_ENABLED": false,
-    "REFERENCE_ENABLED": false,
-    "REFERENCE_DIR": "references",
-    "REFERENCE_URLS": [],
-    "REFERENCE_CACHE_DIR": "reference_cache"
+  "PROMPT_RESEARCH_ENABLED": false,
+  "PROMPT_DEBUG_MODE": "off",
+  "PROMPT_DEBUG_LINES": 10
 }
-
 ```
+
+이 값들은 기존 `config.json`의 최상위 객체 안에 추가하거나 필요에 따라 바꾸세요.
 
 ### 채널 해시값 추출 방법
 
@@ -221,7 +220,7 @@ VOD를 선택한 뒤 퍼센트 대신 `MM:SS` 또는 `HH:MM:SS` 형식으로 분
 
 # 🛠️ Prompt 커스텀
 
-프로젝트 루트에 아래 파일을 추가하면 AI 분석 품질을 개선할 수 있습니다.
+저장소 루트에 아래 파일을 두어 프롬프트 및 채널별 참고 정보를 관리할 수 있습니다.
 
 ## streamer_profiles/<치지직_채널_ID>.txt
 
@@ -350,7 +349,7 @@ HTML 표·목록의 셀은 항목별 줄바꿈으로 보존하고, 하위 문서
 전달됩니다. 파서 버전이 바뀐 오래된 캐시는 자동 갱신을 시도하고, 네트워크 갱신에
 실패하면 기존 캐시로 복귀합니다.
 
-## prompt.txt
+## prompt.txt (기존 추가 지침 가져오기)
 
 AI 행동 지침
 
@@ -361,6 +360,57 @@ AI 행동 지침
 - 게임명 정확히 표기
 - 핵심 장면 위주 정리
 ```
+
+프롬프트 레지스트리가 아직 없을 때 `prompt.txt`가 있으면 내용을 가져와 타임라인 분석
+구간으로 등록합니다. 독립된 `[제목]` 줄은 구간 제목으로 분리됩니다. 레지스트리가 만들어진
+뒤에는 `prompt.txt`를 매번 다시 읽지 않으므로 이후 내용은 실행 메뉴 `[4]`에서 편집하세요.
+
+실행 메뉴의 `[4] 프롬프트 선택 및 편집`에서 타임라인 분석과 최종 교정 프롬프트를
+`[]` 제목 구간별로 켜고 끌 수 있습니다. 프롬프트와 휴지통을 탭으로 나누며, 구간 본문을
+불러와 조금만 수정하고 버전 이력을 보거나 새 구간을 추가·삭제·복원할 수 있습니다.
+프롬프트 탭의 위/아래 버튼으로 순서를 바꾸면 미리보기와 실제 전송 순서에 반영됩니다.
+
+적용하려면 두 호출 단계 각각에서 하나 이상의 구간을 선택해야 합니다. 부분 수정은 기본
+구간의 revision을 교체해 원본과 수정본이 중복 전송되지 않습니다. 저장과 적용은 별도이며,
+적용 전에는 이전 선택이 유지됩니다. 후처리 코드는 별도로 점수 기준 필터와 시간·분류·표기
+보정을 하므로 화면에서 해당 사실을 안내합니다. Tkinter를 사용할 수 없을 때는 콘솔에서
+`t`로 프롬프트/휴지통을 전환하고 `u번호`/`d번호`로 항목을 이동할 수 있습니다.
+
+메뉴 `[1]` 또는 `[2]`의 모델 호출 직전 전달 내용을 확인하려면 `config.json`에서 다음 값을
+설정합니다. `preview`에서는 선택 항목과 프롬프트 일부가 먼저 표시되고, 그 다음 Codex 호출
+상태가 출력된 뒤 모델 요청을 보냅니다.
+
+```json
+{
+  "PROMPT_DEBUG_MODE": "preview",
+  "PROMPT_DEBUG_LINES": 10
+}
+```
+
+`off`는 기본값으로 아무 내용도 출력하지 않습니다. `summary`는 선택 구간과 전송문 길이·해시를,
+`preview`는 여기에 전송문 앞 N줄과 마지막 지시를 덧붙여 보여줍니다. `full`은 미리보기와 함께
+실제 프롬프트 TXT, 별도 schema JSON, 요청 정보를 `prompt_debug/`에 저장합니다. 전체 파일에는
+STT·채팅 등 입력 데이터가 들어갈 수 있으므로, `full`은 로컬에서 내용을 확인하고 보관 위치를
+관리할 수 있을 때 사용하세요. `PROMPT_DEBUG_LINES`는 1~200줄 범위로 설정할 수 있습니다.
+schema가 전달되는 타임라인 분석과 달리 최종 교정은 별도 schema가
+없다고 표시합니다. 빈 모델 설정은 `CLI default (actual model unknown)`으로 표시됩니다.
+
+구간과 버전은 `prompts/prompt_registry.json`에 저장됩니다. 기존 v1 저장소는 앱에서
+마이그레이션할 때 `prompt_registry.json.v1.bak`에 원본을 보존합니다.
+
+메뉴 `[1]` 또는 `[2]`에서 `"PROMPT_RESEARCH_ENABLED": true`를 지정하면 실제 전송 프롬프트,
+STT·채팅, 모델 원응답과 정제 결과가 `prompt_research/`에 로컬 저장됩니다. 원문이
+포함되므로 기본값은 꺼져 있습니다. 설정된 모델명이 빈 값이면 실제 선택 모델을 확인할 수
+없어 `CLI default`로 표시합니다.
+
+두 연구 기록의 같은 입력을 구조적으로 비교하려면 다음을 실행합니다.
+
+```bash
+python src/code/compare_prompt_runs.py prompt_research/<run-A>.json prompt_research/<run-B>.json
+```
+
+이 도구는 동일 단계·입력 기록과 프롬프트 차이 및 출력 길이를 보여줍니다. 의미상 정확도는
+사람이 정답 표본을 마련해 별도로 평가해야 합니다.
 
 ---
 
@@ -438,7 +488,8 @@ ctranslate2
 # ▶️ 실행 방법
 
 ```bash
-python Main.py
+# 저장소 루트에서 실행
+python src/code/Main.py
 ```
 
 ---
