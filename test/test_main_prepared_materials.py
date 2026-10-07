@@ -199,6 +199,97 @@ class PreparedTimelineMaterialsTest(unittest.TestCase):
         select_vod.assert_not_called()
         download_audio.assert_not_called()
 
+    def run_chunk_reporting_scenario(self, outcomes, *, duration=7200):
+        script = "\n".join(
+            f"[{hour:02d}:00:01] 테스트 대사 {hour}"
+            for hour in range(min(2, (duration + 3599) // 3600))
+        )
+        generated = []
+        merged_items = []
+
+        def merge_items(items):
+            merged_items.append(items)
+            return "[00:00:01] 결과"
+
+        def generate_chunk(**kwargs):
+            generated.append(kwargs)
+            chunk_index = kwargs["chunk_index"]
+            outcome = outcomes.get(chunk_index, "empty")
+            if outcome == "failure":
+                kwargs["failed_chunk_indices"].append(chunk_index)
+                return []
+            if outcome == "success":
+                return [{"seconds": chunk_index * 3600, "content": f"성공 {chunk_index}"}]
+            return []
+
+        timestamp_values = {f"{hour:02d}:00:01": hour * 3600 + 1 for hour in range(24)}
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(temp_dir)
+                with contextlib.ExitStack() as stack:
+                    patches = (
+                        mock.patch.object(self.main, "choose_asr_options", return_value=("base", "ko", False, "")),
+                        mock.patch.object(self.main, "ensure_codex_ready"),
+                        mock.patch.object(self.main, "select_chzzk_vod", return_value=("123", "제목", duration, "스트리머")),
+                        mock.patch.object(self.main, "ask_analysis_time_range", return_value=(0, duration)),
+                        mock.patch.object(self.main, "ask_use_collab_member_reference", return_value=False),
+                        mock.patch.object(self.main, "load_prepared_timeline_materials", return_value=script),
+                        mock.patch.object(self.main, "download_chzzk_vod_chats", return_value=""),
+                        mock.patch.object(self.main, "timestamp_to_seconds", side_effect=lambda value: timestamp_values[value]),
+                        mock.patch.object(self.main, "generate_chzzk_timeline", side_effect=generate_chunk),
+                        mock.patch.object(self.main, "merge_and_format_final_timeline", side_effect=merge_items),
+                        mock.patch.object(self.main, "correct_streamer_nicknames_with_codex", side_effect=lambda timeline_text, **kwargs: timeline_text),
+                        mock.patch.object(self.main, "load_reference_context", return_value=""),
+                        mock.patch.object(self.main, "prepare_streamer_profile", return_value=("스트리머", "")),
+                        mock.patch.object(self.main, "configure_prompt_debug"),
+                        mock.patch.object(self.main, "ACTIVE_RECORDER", None),
+                        mock.patch.object(self.main.os, "startfile", create=True),
+                        mock.patch("builtins.input", return_value=""),
+                    )
+                    for active_patch in patches:
+                        stack.enter_context(active_patch)
+                    with contextlib.redirect_stdout(output):
+                        self.main.run_pure_test(timeline_only=True, prompt_snapshot={})
+            finally:
+                os.chdir(previous_cwd)
+
+        return output.getvalue(), generated, merged_items
+
+    def test_partial_chunk_failure_warns_once_and_keeps_successful_items(self):
+        output, generated, merged_items = self.run_chunk_reporting_scenario(
+            {0: "failure", 1: "success"}, duration=10800
+        )
+        warning_lines = [line for line in output.splitlines() if "Codex 처리 실패 청크" in line]
+        self.assertEqual(["⚠️ Codex 처리 실패 청크: 0"], warning_lines)
+        self.assertIn("[2번 청크] 해당 시간 구간에 매칭되는 STT", output)
+        self.assertEqual(2, len(generated))
+        self.assertIs(generated[0]["failed_chunk_indices"], generated[1]["failed_chunk_indices"])
+        self.assertEqual([0], generated[0]["failed_chunk_indices"])
+        self.assertEqual([[{"seconds": 3600, "content": "성공 1"}]], merged_items)
+
+    def test_all_chunk_failures_warn_before_existing_empty_result_error(self):
+        output, generated, merged_items = self.run_chunk_reporting_scenario(
+            {0: "failure", 1: "failure"}
+        )
+        self.assertEqual(2, len(generated))
+        self.assertIn("⚠️ Codex 처리 실패 청크: 0, 1", output)
+        self.assertIn("❌ Codex가 정상적인 타임라인 항목 뼈대를 생성하지 못했습니다.", output)
+        self.assertLess(
+            output.index("⚠️ Codex 처리 실패 청크"),
+            output.index("❌ Codex가 정상적인 타임라인 항목 뼈대를 생성하지 못했습니다."),
+        )
+        self.assertEqual([], merged_items)
+
+    def test_successful_empty_chunk_does_not_emit_failure_warning(self):
+        output, generated, merged_items = self.run_chunk_reporting_scenario({})
+        self.assertEqual(2, len(generated))
+        self.assertTrue(all(call["failed_chunk_indices"] == [] for call in generated))
+        self.assertNotIn("Codex 처리 실패 청크", output)
+        self.assertIn("❌ Codex가 정상적인 타임라인 항목 뼈대를 생성하지 못했습니다.", output)
+        self.assertEqual([], merged_items)
+
     def test_diarization_overlap_policy(self):
         timeline_path = Path(__file__).parents[1] / "src" / "code" / "Timeline.py"
         timeline_dir = str(timeline_path.parent)

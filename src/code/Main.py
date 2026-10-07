@@ -479,6 +479,7 @@ def run_pure_test(timeline_only=False, prompt_snapshot=None):
     script_lines = full_transcription.split("\n")
     CHUNK_SIZE_SECS = 3600
     all_raw_items = []
+    failed_chunk_indices = []
 
     current_chunk_start = global_start_sec
     while current_chunk_start < global_end_sec:
@@ -525,12 +526,17 @@ def run_pure_test(timeline_only=False, prompt_snapshot=None):
             target_channel_id=target_channel_id,
             streamer_profile_context=streamer_profile_context,
             prompt_snapshot=prompt_snapshot,
+            failed_chunk_indices=failed_chunk_indices,
         )
 
         if chunk_items:
             all_raw_items.extend(chunk_items)
 
         current_chunk_start = current_chunk_end
+
+    if failed_chunk_indices:
+        failed_chunks = ", ".join(str(index) for index in failed_chunk_indices)
+        print(f"⚠️ Codex 처리 실패 청크: {failed_chunks}")
 
     if not all_raw_items:
         print("❌ Codex가 정상적인 타임라인 항목 뼈대를 생성하지 못했습니다.")

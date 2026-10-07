@@ -47,7 +47,7 @@ class TimelinePostprocessingTest(unittest.TestCase):
     def setUpClass(cls):
         cls.timeline = load_timeline()
 
-    def generate(self, raw_response, script=""):
+    def generate(self, raw_response, script="", **generation_kwargs):
         timeline = self.timeline
         recorder = mock.Mock()
         with ExitStack() as stack:
@@ -69,7 +69,7 @@ class TimelinePostprocessingTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(timeline, "ACTIVE_RECORDER", recorder))
             stack.enter_context(redirect_stdout(StringIO()))
             result = timeline.generate_chzzk_timeline(
-                script, streamer_profile_context="", prompt_snapshot={}
+                script, streamer_profile_context="", prompt_snapshot={}, **generation_kwargs
             )
         recorder.record.assert_called_once()
         self.assertIs(result, recorder.record.call_args.args[4])
@@ -103,6 +103,47 @@ class TimelinePostprocessingTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as raised:
                 self.generate(response([item("정상 입력")]))
         self.assertIs(error, raised.exception)
+
+    def test_retry_exhaustion_records_chunk_once(self):
+        timeline = self.timeline
+        recorder = mock.Mock()
+        failed_chunks = []
+        with ExitStack() as stack:
+            for name, value in {
+                "sanitize_chzzk_url": "",
+                "select_streamer_profile_context": "",
+                "_format_retrieved_knowledge": "",
+                "_retrieve_namuwiki_knowledge": [],
+                "load_streamer_knowledge": [],
+                "load_and_filter_streamers_db": [],
+                "format_content_persona_context": "",
+                "_select_reference_sections": "",
+                "debug_prompt_before_call": None,
+            }.items():
+                stack.enter_context(mock.patch.object(timeline, name, return_value=value))
+            codex = stack.enter_context(
+                mock.patch.object(timeline, "run_codex", side_effect=RuntimeError("offline failure"))
+            )
+            stack.enter_context(mock.patch.object(timeline.time, "sleep"))
+            stack.enter_context(mock.patch.object(timeline, "ACTIVE_RECORDER", recorder))
+            stack.enter_context(redirect_stdout(StringIO()))
+            result = timeline.generate_chzzk_timeline(
+                "[00:00:10] phrase", chunk_index=7, streamer_profile_context="",
+                prompt_snapshot={}, failed_chunk_indices=failed_chunks,
+            )
+
+        self.assertEqual([], result)
+        self.assertEqual(5, codex.call_count)
+        self.assertEqual([7], failed_chunks)
+        recorder.record.assert_not_called()
+
+    def test_successful_empty_response_does_not_record_failed_chunk(self):
+        failed_chunks = []
+        result = self.generate(
+            response([]), failed_chunk_indices=failed_chunks
+        )
+        self.assertEqual([], result)
+        self.assertEqual([], failed_chunks)
 
     def test_normal_and_fallback_score_boundaries(self):
         items = [item("39 제외", wf=39), item("40 유지", wf=40),

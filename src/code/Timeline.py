@@ -2709,6 +2709,7 @@ def generate_chzzk_timeline(
     target_channel_id="",
     streamer_profile_context=None,
     prompt_snapshot=None,
+    failed_chunk_indices=None,
 ):
     chzzk_url = sanitize_chzzk_url(chzzk_url)
     if prompt_snapshot is None:
@@ -2839,6 +2840,8 @@ def generate_chzzk_timeline(
 
     if not response_json_text:
         print("❌ 자동 최대 재시도 임계값 초과로 해당 청크구간을 건너뜜.")
+        if failed_chunk_indices is not None:
+            failed_chunk_indices.append(chunk_index)
         return []
 
     raw_items = []
