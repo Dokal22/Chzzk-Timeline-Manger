@@ -2207,7 +2207,7 @@ def _is_public_reference_host(hostname: str) -> bool:
         except (OSError, ValueError):
             return False
     return bool(addresses) and all(
-        not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved)
+        addr.is_global and not addr.is_multicast
         for addr in addresses
     )
 

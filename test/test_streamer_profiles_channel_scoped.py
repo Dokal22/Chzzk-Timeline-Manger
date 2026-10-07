@@ -430,7 +430,12 @@ class ChannelScopedStreamerProfileTests(unittest.TestCase):
         response = types.SimpleNamespace(status_code=200, headers={"Content-Type": "text/html"}, is_redirect=False)
         response.iter_content = lambda chunk_size: [b"x" * (self.timeline.REFERENCE_MAX_URL_BYTES + 1)]
         response.close = lambda: None
-        with mock.patch.object(self.timeline.requests, "get", return_value=response, create=True):
+        global_dns_answer = [
+            (self.timeline.socket.AF_INET, self.timeline.socket.SOCK_STREAM,
+             self.timeline.socket.IPPROTO_TCP, "", ("93.184.216.34", 0))
+        ]
+        with mock.patch.object(self.timeline.socket, "getaddrinfo", return_value=global_dns_answer), \
+             mock.patch.object(self.timeline.requests, "get", return_value=response, create=True):
             status, text, metadata = self.timeline._fetch_reference_url("https://example.com/page")
         self.assertEqual(0, status)
         self.assertEqual("", text)
