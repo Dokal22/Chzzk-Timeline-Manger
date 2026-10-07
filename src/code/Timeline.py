@@ -2583,6 +2583,119 @@ def load_reference_context(enabled: bool, reference_dir: str = "references", ref
         context = encoded[:REFERENCE_MAX_CONTEXT_BYTES].decode("utf-8", errors="ignore")
     return context
 
+def _postprocess_timeline_item(item, streamer_stt_list, *, fallback=False):
+    """Apply the same score, content, and timestamp rules to either input path."""
+    gl = item.get("group_large", "").strip()
+    topic = item.get("topic", "").strip()
+    ts = item.get("timestamp", "").strip()
+    wf = item.get("wf", 0)
+    wi = item.get("wi", 0)
+    content_val = item.get("content", "").strip()
+    topic = re.sub(r"\(.*?\)", "", topic).strip()
+    content_val = content_val.replace("🔥", "").strip()
+
+    if any(hallucination in topic or hallucination in content_val for hallucination in ["리코더", "삑사리", "악기 연주", "피아노"]):
+        if "노래" not in gl and "음악" not in gl:
+            return None
+
+    talk_keywords = ["언급", "회상", "기억", "추억", "예전", "지난 방송", "이야기", "썰", "얘기", "토크"]
+    if (gl == "게임 방송" or (fallback and gl == "ゲーム 방송")) and any(word in topic or word in content_val for word in talk_keywords):
+        gl = "저스트 채팅"
+        topic = "과거 합방 언급 및 토크"
+
+    current_secs = timestamp_to_seconds(ts)
+    best_matched_sec = current_secs
+    keyword_candidate = content_val[:4] if len(content_val) >= 4 else content_val
+
+    is_critical_moment = (wf >= 42 or "킬" in content_val or "승리" in content_val or "압살" in content_val or "클리어" in content_val or "전멸" in content_val)
+    is_general_summary = (wi >= 35 and wf < 30)
+
+    matched_flag = False
+    for stt_sec, stt_text in streamer_stt_list:
+        if abs(current_secs - stt_sec) <= 15 and keyword_candidate in stt_text:
+            cleaned_stt = re.sub(r"^(어|음|아|그|그게|있잖아|어음)\s+", "", stt_text).strip()
+            if cleaned_stt != stt_text and len(cleaned_stt) > 0:
+                char_diff = len(stt_text) - len(cleaned_stt)
+                est_delay = max(0.0, char_diff * 0.25)
+                stt_sec = stt_sec + est_delay
+
+            if is_critical_moment:
+                best_matched_sec = stt_sec - 0.5
+            elif is_general_summary:
+                best_matched_sec = max(0.0, stt_sec - 3.0)
+            else:
+                best_matched_sec = max(0.0, stt_sec - 1.5)
+
+            matched_flag = True
+            break
+
+    if not matched_flag:
+        for stt_sec, stt_text in streamer_stt_list:
+            if abs(current_secs - stt_sec) <= 5:
+                cleaned_stt = re.sub(r"^(어|음|아|그|그게|있잖아|어음)\s+", "", stt_text).strip()
+                if cleaned_stt != stt_text and len(cleaned_stt) > 0:
+                    char_diff = len(stt_text) - len(cleaned_stt)
+                    est_delay = max(0.0, char_diff * 0.25)
+                    stt_sec = stt_sec + est_delay
+
+                if is_critical_moment:
+                    best_matched_sec = stt_sec - 0.5
+                elif is_general_summary:
+                    best_matched_sec = max(0.0, stt_sec - 3.0)
+                else:
+                    best_matched_sec = max(0.0, stt_sec - 1.5)
+                break
+
+    if best_matched_sec != current_secs:
+        ts = seconds_to_timestamp(int(best_matched_sec))
+        current_secs = int(best_matched_sec)
+
+    if current_secs > 1800:
+        if gl in ["오프닝", "방송시작", "방송 시작"]:
+            gl = "저스트 채팅"
+        if any(x in topic for x in ["시작", "오프닝", "인사"]):
+            topic = "방송 잡담 및 일상 공유"
+
+    if any(x in topic for x in ["소통", "시청자 리액션", "리액션", "티키타카"]):
+        topic = "방송 잡담 및 일상 공유"
+
+    if wf + wi >= 40 or wi >= 25:
+        cleaned_content = re.sub(r"\s*\(\s*\d+\s*단계\s*\)\s*", " ", content_val).strip()
+        cleaned_content = cleaned_content.replace("[채팅폭발]", "").strip()
+        cleaned_content = re.sub(r"\[\s*[^\]]+;\s*[^\]]+\s*\]", "", cleaned_content).strip()
+
+        pure_text = cleaned_content.replace("🔥", "").strip()
+        if not pure_text or re.match(r"^[><!?\s\"']+$", pure_text) or re.match(r"^ㅋ+$", pure_text):
+            return None
+
+        cleaned_content = re.sub(r'ㅋ{4,}', 'ㅋㅋㅋ', cleaned_content).replace("전개.", "").replace("수행.", "").strip()
+
+        return {
+            "seconds": current_secs,
+            "timestamp": ts,
+            "group_large": gl,
+            "topic": topic,
+            "content": cleaned_content
+        }
+    return None
+
+
+def _recover_timeline_items(response_json_text):
+    """Recover complete flat item objects without crossing an object boundary."""
+    object_pattern = r'\{(?:[^{}"]|"(?:\\.|[^"\\])*")*\}'
+    for match in re.finditer(object_pattern, response_json_text, re.DOTALL):
+        try:
+            item = json.loads(match.group(), strict=False)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict) and all(
+            key in item for key in ("group_large", "topic", "timestamp", "content")
+        ):
+            # Scores remain in this same object; missing scores default to zero
+            # in the shared processor, just as they do for normal JSON items.
+            yield item
+
+
 def generate_chzzk_timeline(
     input_script,
     chat_script="",
@@ -2732,192 +2845,26 @@ def generate_chzzk_timeline(
 
     try:
         data = json.loads(response_json_text, strict=False)
+    except json.JSONDecodeError:
+        items = _recover_timeline_items(response_json_text)
+        fallback = True
+    else:
         items = data.get("items", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            items = []
+        fallback = False
 
-        for item in items:
-            gl = item.get("group_large", "").strip()
-            topic = item.get("topic", "").strip()
-            ts = item.get("timestamp", "").strip()
-            wf = item.get("wf", 0)
-            wi = item.get("wi", 0)
-            content_val = item.get("content", "").strip()
-            topic = re.sub(r"\(.*?\)", "", topic).strip()
-            content_val = content_val.replace("🔥", "").strip()
-
-            if any(hallucination in topic or hallucination in content_val for hallucination in ["리코더", "삑사리", "악기 연주", "피아노"]):
-                if "노래" not in gl and "음악" not in gl:
-                    continue
-
-            talk_keywords = ["언급", "회상", "기억", "추억", "예전", "지난 방송", "이야기", "썰", "얘기", "토크"]
-            if gl == "게임 방송" and any(word in topic or word in content_val for word in talk_keywords):
-                gl = "저스트 채팅"
-                topic = "과거 합방 언급 및 토크"
-
-            current_secs = timestamp_to_seconds(ts)
-            best_matched_sec = current_secs
-            keyword_candidate = content_val[:4] if len(content_val) >= 4 else content_val
-
-            is_critical_moment = (wf >= 42 or "킬" in content_val or "승리" in content_val or "압살" in content_val or "클리어" in content_val or "전멸" in content_val)
-            is_general_summary = (wi >= 35 and wf < 30)
-
-            matched_flag = False
-            for stt_sec, stt_text in streamer_stt_list:
-                if abs(current_secs - stt_sec) <= 15 and keyword_candidate in stt_text:
-                    cleaned_stt = re.sub(r"^(어|음|아|그|그게|있잖아|어음)\s+", "", stt_text).strip()
-                    if cleaned_stt != stt_text and len(cleaned_stt) > 0:
-                        char_diff = len(stt_text) - len(cleaned_stt)
-                        est_delay = max(0.0, char_diff * 0.25)
-                        stt_sec = stt_sec + est_delay
-
-                    if is_critical_moment:
-                        best_matched_sec = stt_sec - 0.5
-                    elif is_general_summary:
-                        best_matched_sec = max(0.0, stt_sec - 3.0)
-                    else:
-                        best_matched_sec = max(0.0, stt_sec - 1.5)
-
-                    matched_flag = True
-                    break
-
-            if not matched_flag:
-                for stt_sec, stt_text in streamer_stt_list:
-                    if abs(current_secs - stt_sec) <= 5:
-                        cleaned_stt = re.sub(r"^(어|음|아|그|그게|있잖아|어음)\s+", "", stt_text).strip()
-                        if cleaned_stt != stt_text and len(cleaned_stt) > 0:
-                            char_diff = len(stt_text) - len(cleaned_stt)
-                            est_delay = max(0.0, char_diff * 0.25)
-                            stt_sec = stt_sec + est_delay
-
-                        if is_critical_moment:
-                            best_matched_sec = stt_sec - 0.5
-                        elif is_general_summary:
-                            best_matched_sec = max(0.0, stt_sec - 3.0)
-                        else:
-                            best_matched_sec = max(0.0, stt_sec - 1.5)
-                        break
-
-            if best_matched_sec != current_secs:
-                ts = seconds_to_timestamp(int(best_matched_sec))
-                current_secs = int(best_matched_sec)
-
-            if current_secs > 1800:
-                if gl in ["오프닝", "방송시작", "방송 시작"]:
-                    gl = "저스트 채팅"
-                if any(x in topic for x in ["시작", "오프닝", "인사"]):
-                    topic = "방송 잡담 및 일상 공유"
-
-            if any(x in topic for x in ["소통", "시청자 리액션", "리액션", "티키타카"]):
-                topic = "방송 잡담 및 일상 공유"
-
-            if wf + wi >= 40 or wi >= 25:
-                cleaned_content = re.sub(r"\s*\(\s*\d+\s*단계\s*\)\s*", " ", content_val).strip()
-                cleaned_content = cleaned_content.replace("[채팅폭발]", "").strip()
-                cleaned_content = re.sub(r"\[\s*[^\]]+;\s*[^\]]+\s*\]", "", cleaned_content).strip()
-
-                pure_text = cleaned_content.replace("🔥", "").strip()
-                if not pure_text or re.match(r"^[><!?\s\"']+$", pure_text) or re.match(r"^ㅋ+$", pure_text):
-                    continue
-
-                cleaned_content = re.sub(r'ㅋ{4,}', 'ㅋㅋㅋ', cleaned_content).replace("전개.", "").replace("수행.", "").strip()
-
-                raw_items.append({
-                    "seconds": current_secs,
-                    "timestamp": ts,
-                    "group_large": gl,
-                    "topic": topic,
-                    "content": cleaned_content
-                })
-
-    except Exception as parse_error:
-        matches = re.findall(r'"group_large"\s*:\s*"([^"]+)"\s*,\s*"topic"\s*:\s*"([^"]+)"\s*,\s*"timestamp"\s*:\s*"([^"]+)"\s*,.*?,"content"\s*:\s*"([^"]+)"', response_json_text, re.DOTALL)
-
-        for gl, topic, ts, content_str in matches:
-            gl_val = gl.strip()
-            topic_val = re.sub(r"\(.*?\)", "", topic.strip()).strip()
-            ts_val = ts.strip()
-            content_val = content_str.strip().replace("🔥", "").strip()
-
-            if any(hallucination in topic_val or hallucination in content_val for hallucination in ["리코더", "삑사리", "악기 연주", "피아노"]):
-                if "노래" not in gl_val and "음악" not in gl_val:
-                    continue
-
-            talk_keywords = ["언급", "회상", "기억", "추억", "예전", "지난 방송", "이야기", "썰", "얘기", "토크"]
-            if gl_val in ["ゲーム 방송", "게임 방송"] and any(word in topic_val or word in content_val for word in talk_keywords):
-                gl_val = "저스트 채팅"
-                topic_val = "과거 합방 언급 및 토크"
-
-            current_secs = timestamp_to_seconds(ts_val)
-            best_matched_sec = current_secs
-            keyword_candidate = content_val[:4] if len(content_val) >= 4 else content_val
-
-            is_critical_moment = (content_val.find("킬") != -1 or content_val.find("승리") != -1 or content_val.find("압살") != -1 or content_val.find("클리어") != -1)
-            is_general_summary = (topic_val.find("토크") != -1 or topic_val.find("공유") != -1 or topic_val.find("잡담") != -1)
-
-            matched_flag = False
-            for stt_sec, stt_text in streamer_stt_list:
-                if abs(current_secs - stt_sec) <= 15 and keyword_candidate in stt_text:
-                    cleaned_stt = re.sub(r"^(어|음|아|그|그게|있잖아|어음)\s+", "", stt_text).strip()
-                    if cleaned_stt != stt_text and len(cleaned_stt) > 0:
-                        char_diff = len(stt_text) - len(cleaned_stt)
-                        est_delay = max(0.0, char_diff * 0.25)
-                        stt_sec = stt_sec + est_delay
-
-                    if is_critical_moment:
-                        best_matched_sec = stt_sec - 0.5
-                    elif is_general_summary:
-                        best_matched_sec = max(0.0, stt_sec - 3.0)
-                    else:
-                        best_matched_sec = max(0.0, stt_sec - 1.5)
-                    matched_flag = True
-                    break
-
-            if not matched_flag:
-                for stt_sec, stt_text in streamer_stt_list:
-                    if abs(current_secs - stt_sec) <= 5:
-                        cleaned_stt = re.sub(r"^(어|음|아|그|그게|있잖아|어음)\s+", "", stt_text).strip()
-                        if cleaned_stt != stt_text and len(cleaned_stt) > 0:
-                            char_diff = len(stt_text) - len(cleaned_stt)
-                            est_delay = max(0.0, char_diff * 0.25)
-                            stt_sec = stt_sec + est_delay
-
-                        if is_critical_moment:
-                            best_matched_sec = stt_sec - 0.5
-                        elif is_general_summary:
-                            best_matched_sec = max(0.0, stt_sec - 3.0)
-                        else:
-                            best_matched_sec = max(0.0, stt_sec - 1.5)
-                        break
-
-            if best_matched_sec != current_secs:
-                ts_val = seconds_to_timestamp(int(best_matched_sec))
-                current_secs = int(best_matched_sec)
-
-            if current_secs > 1800:
-                if gl_val in ["오프닝", "방송시작", "방송 시작"]:
-                    gl_val = "저스트 채팅"
-                if any(x in topic_val for x in ["시작", "오프닝", "인사"]):
-                    topic_val = "방송 잡담 및 일상 공유"
-
-            if any(x in topic_val for x in ["소통", "시청자 리액션", "리액션", "티키타카"]):
-                topic_val = "방송 잡담 및 일상 공유"
-
-            cleaned_content = re.sub(r"\s*\(\s*\d+\s*단계\s*\)\s*", " ", content_val).strip()
-            cleaned_content = cleaned_content.replace("[채팅폭발]", "").strip()
-            cleaned_content = re.sub(r"\[\s*[^\]]+;\s*[^\]]+\s*\]", "", cleaned_content).strip()
-
-            pure_text = cleaned_content.replace("🔥", "").strip()
-            if not pure_text or re.match(r"^[><!?\s\"']+$", pure_text) or re.match(r"^ㅋ+$", pure_text):
-                continue
-
-            cleaned_content = re.sub(r'ㅋ{4,}', 'ㅋㅋㅋ', cleaned_content).replace("전개.", "").replace("수행.", "").strip()
-
-            raw_items.append({
-                "seconds": current_secs,
-                "timestamp": ts_val,
-                "group_large": gl_val,
-                "topic": topic_val,
-                "content": cleaned_content
-            })
+    for item in items:
+        try:
+            processed_item = _postprocess_timeline_item(
+                item, streamer_stt_list, fallback=fallback
+            )
+        except (AttributeError, TypeError, ValueError):
+            # A malformed item must not replay earlier items through fallback
+            # or prevent later valid items from being processed.
+            continue
+        if processed_item is not None:
+            raw_items.append(processed_item)
 
     ACTIVE_RECORDER.record(
         "timeline", user_content, request_prompt,
