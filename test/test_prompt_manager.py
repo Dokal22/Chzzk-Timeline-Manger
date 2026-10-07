@@ -1,4 +1,6 @@
 import importlib.util
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import tempfile
 import unittest
@@ -11,6 +13,17 @@ SPEC.loader.exec_module(PROMPTS)
 
 
 class PromptRegistryTest(unittest.TestCase):
+    LEGACY_PROMPT = "서문\n\n[한 규칙]\n내용\n\n[둘 규칙]\n내용2"
+
+    def create_saved_registry(self, root, prompt_text=LEGACY_PROMPT):
+        root_path = Path(root)
+        if prompt_text is not None:
+            (root_path / "prompt.txt").write_text(prompt_text, encoding="utf-8")
+        registry = PROMPTS.PromptRegistry(root)
+        registry.save()
+        registry_path = root_path / "prompts" / PROMPTS.STORE_NAME
+        return registry_path, registry.snapshot(), registry_path.read_bytes()
+
     def test_section_parser_only_splits_standalone_headings_and_keeps_preamble(self):
         source = "역할 설명 [본문 속 대괄호]\n\n[규칙 A]\n문장 [예시] 보존\n시간 [01:02:03]\n\n[규칙 B]\n둘째"
         sections = PROMPTS.split_sections("timeline", "test", source)
@@ -26,6 +39,79 @@ class PromptRegistryTest(unittest.TestCase):
             self.assertEqual(["역할 및 분석 목적", "한 규칙", "둘 규칙"], [x["name"] for x in legacy])
             self.assertEqual(len(timeline), len(registry.snapshot()["timeline"]))
             self.assertEqual(3, len(registry.snapshot()["nickname_review"]))
+
+    def test_missing_registry_bootstraps_defaults_and_legacy_without_warning(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "prompt.txt").write_text(self.LEGACY_PROMPT, encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                registry = PROMPTS.PromptRegistry(root)
+            self.assertEqual("", registry.warning)
+            self.assertEqual("", output.getvalue())
+            self.assertTrue(any(item["source"] == "builtin" for item in registry.list("timeline")))
+            self.assertTrue(any(item["source"] == "prompt.txt" for item in registry.list("timeline")))
+            self.assertFalse((Path(root) / "prompts" / PROMPTS.STORE_NAME).exists())
+
+    def test_missing_registry_and_prompt_txt_bootstraps_defaults_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = StringIO()
+            with redirect_stdout(output):
+                registry = PROMPTS.PromptRegistry(root)
+            self.assertEqual("", registry.warning)
+            self.assertEqual("", output.getvalue())
+            self.assertTrue(registry.snapshot()["timeline"])
+            self.assertTrue(registry.snapshot()["nickname_review"])
+            self.assertFalse(any(item["source"] == "prompt.txt" for item in registry.list("timeline")))
+
+    def test_existing_registry_and_identical_prompt_txt_has_no_warning(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.create_saved_registry(root)
+            output = StringIO()
+            with redirect_stdout(output):
+                registry = PROMPTS.PromptRegistry(root)
+            self.assertEqual("", registry.warning)
+            self.assertEqual("", output.getvalue())
+
+    def test_existing_registry_mismatches_warn_without_replacing_registry(self):
+        changed_sources = {
+            "body changed": self.LEGACY_PROMPT.replace("내용2", "수정된 내용"),
+            "title changed": self.LEGACY_PROMPT.replace("둘 규칙", "새 제목"),
+            "section added": self.LEGACY_PROMPT + "\n\n[추가 규칙]\n추가 내용",
+            "section deleted": "서문\n\n[한 규칙]\n내용",
+            "prompt missing": None,
+        }
+        for name, changed_prompt in changed_sources.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
+                registry_path, original_snapshot, original_bytes = self.create_saved_registry(root)
+                prompt_path = Path(root) / "prompt.txt"
+                if changed_prompt is None:
+                    prompt_path.unlink()
+                else:
+                    prompt_path.write_text(changed_prompt, encoding="utf-8")
+
+                output = StringIO()
+                with redirect_stdout(output):
+                    registry = PROMPTS.PromptRegistry(root)
+
+                self.assertIn("prompt.txt가 저장된 프롬프트 레지스트리와 달라졌습니다", output.getvalue())
+                self.assertIn("기존 prompts/prompt_registry.json이 우선 적용됩니다", output.getvalue())
+                self.assertIn("prompt.txt가 저장된 프롬프트 레지스트리와 달라졌습니다", registry.warning)
+                self.assertEqual(original_snapshot, registry.snapshot())
+                self.assertEqual(original_bytes, registry_path.read_bytes())
+
+    def test_same_mismatch_warns_only_once_per_process_key(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.create_saved_registry(root)
+            (Path(root) / "prompt.txt").write_text(
+                self.LEGACY_PROMPT.replace("내용2", "수정된 내용"), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                first = PROMPTS.PromptRegistry(root)
+                second = PROMPTS.PromptRegistry(root)
+            warning = "prompt.txt가 저장된 프롬프트 레지스트리와 달라졌습니다"
+            self.assertEqual(1, output.getvalue().count(warning))
+            self.assertIn(warning, first.warning)
+            self.assertIn(warning, second.warning)
 
     def test_version_pin_delete_restore_and_minimum_selection(self):
         with tempfile.TemporaryDirectory() as root:

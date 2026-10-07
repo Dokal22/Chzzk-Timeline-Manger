@@ -7,6 +7,8 @@ import re
 import tempfile
 import uuid
 
+# DEFAULT_PROMPTS is the canonical source for built-in prompts. prompt.txt is a
+# legacy supplemental timeline source used only when bootstrapping a registry.
 try:
     from prompt_defaults import DEFAULT_PROMPTS
 except ImportError:
@@ -19,6 +21,7 @@ except ImportError:
 
 STAGES = {"timeline": "타임라인 분석", "nickname_review": "최종 교정"}
 STORE_NAME = "prompt_registry.json"
+_EMITTED_SOURCE_MISMATCH_WARNINGS = set()
 
 
 def _hash(text):
@@ -49,6 +52,7 @@ def _initial_store(root):
     for stage, base in DEFAULT_PROMPTS.items():
         sources = [("builtin", base)]
         if stage == "timeline":
+            # Preserve prompt.txt's distinct legacy rules as supplemental bootstrap entries.
             path = os.path.join(root, "prompt.txt")
             try:
                 with open(path, encoding="utf-8") as handle:
@@ -68,6 +72,42 @@ def _initial_store(root):
             "order_ids": {stage: [p["id"] for p in prompts if p["stage"] == stage] for stage in STAGES}}
 
 
+def _prompt_txt_provenance_signature(root):
+    path = os.path.join(root, "prompt.txt")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return (), "<missing>"
+    except (OSError, UnicodeError):
+        return None, "<unavailable>"
+
+    signature = tuple(
+        (index, title, _hash(section_text))
+        for index, (title, section_text) in enumerate(split_sections("timeline", "prompt.txt", text))
+    )
+    return signature, _hash(text)
+
+
+def _stored_prompt_txt_provenance_signature(data):
+    original = {}
+    for item in data.get("prompts", []):
+        if item.get("source") != "prompt.txt":
+            continue
+        previous = original.get(item.get("id"))
+        if previous is None or item.get("version", 0) < previous.get("version", 0):
+            original[item.get("id")] = item
+    return tuple(sorted(
+        ((item.get("section_index") if isinstance(item.get("section_index"), int) else -1),
+         item.get("name", ""), item.get("source_hash", ""))
+        for item in original.values()
+    ))
+
+
+def _append_warning(existing, message):
+    return f"{existing}\n{message}" if existing else message
+
+
 class PromptRegistry:
     def __init__(self, root=None):
         self.root = os.path.abspath(root or os.getcwd())
@@ -76,7 +116,10 @@ class PromptRegistry:
         self.corrupt_backup_path = self.path + ".corrupt.bak"
         self.warning = ""
         self.corrupt = False
+        self._loaded_existing_v2 = False
         self.data, self.needs_migration = self._load()
+        if self._loaded_existing_v2:
+            self._check_prompt_txt_mismatch()
         if self.needs_migration:
             try:self.save(migrate=True)
             except OSError as exc:self.warning=f"v1 원본은 유지했습니다. 마이그레이션 저장 실패: {exc}"
@@ -90,6 +133,7 @@ class PromptRegistry:
                 if not isinstance(data.get("prompts"), list) or not isinstance(data.get("active"), dict):
                     raise ValueError("잘못된 v2 저장소")
                 for item in data["prompts"]: self._validate(item)
+                self._loaded_existing_v2 = True
                 return data, False
             if version == 1:
                 migrated = _initial_store(self.root)
@@ -112,6 +156,25 @@ class PromptRegistry:
             self.warning = f"프롬프트 저장소를 읽지 못했습니다: {exc}"
             self.corrupt = True
             return _initial_store(self.root), False
+
+    def _check_prompt_txt_mismatch(self):
+        current_signature, prompt_fingerprint = _prompt_txt_provenance_signature(self.root)
+        if current_signature is None:
+            return
+        if current_signature == _stored_prompt_txt_provenance_signature(self.data):
+            return
+
+        message = (
+            "⚠️ prompt.txt가 저장된 프롬프트 레지스트리와 달라졌습니다.\n"
+            "현재 실행에는 기존 prompts/prompt_registry.json이 우선 적용됩니다. "
+            "Prompt Editor에서 변경 내용을 확인해 주세요."
+        )
+        self.warning = _append_warning(self.warning, message)
+
+        warning_key = (os.path.realpath(self.path), prompt_fingerprint)
+        if warning_key not in _EMITTED_SOURCE_MISMATCH_WARNINGS:
+            print(message)
+            _EMITTED_SOURCE_MISMATCH_WARNINGS.add(warning_key)
 
     @staticmethod
     def _validate(item):
