@@ -44,6 +44,8 @@ REFERENCE_MAX_COMPACT_LINES = 450
 REFERENCE_RETRIEVAL_MAX_RECORDS = 10
 REFERENCE_RETRIEVAL_MAX_CHARS = 6000
 REFERENCE_RETRIEVAL_MAX_BYTES = 12000
+NICKNAME_DB_MAX_CHARS = 6000
+NICKNAME_DB_MAX_BYTES = 12000
 REFERENCE_RETRIEVAL_NEIGHBORS = 1
 REFERENCE_GENERIC_TOKENS = {"게임", "서버", "사람", "진행", "콘텐츠", "방송", "참여", "시스템", "스토리", "규칙", "인원", "과정"}
 REFERENCE_EXCLUDED_HEADING_TERMS = ("논란", "사건", "사고", "비판", "평가", "흥행", "여담", "외부 링크", "외부링크", "둘러보기", "편집", "역사", "최근 변경", "최근 토론", "특수 기능", "편집 요청", "ACL", "로그인")
@@ -2941,6 +2943,41 @@ def merge_and_format_final_timeline(all_processed_items: list) -> str:
 
     return "\n".join(final_output_lines)
 
+def _limit_nickname_db_prompt_text(db_text: str) -> str:
+    if len(db_text) <= NICKNAME_DB_MAX_CHARS and len(db_text.encode("utf-8")) <= NICKNAME_DB_MAX_BYTES:
+        return db_text
+
+    included_lines = []
+    total_chars = 0
+    total_bytes = 0
+    for line in db_text.splitlines(keepends=True):
+        line_bytes = len(line.encode("utf-8"))
+        if (total_chars + len(line) > NICKNAME_DB_MAX_CHARS or
+                total_bytes + line_bytes > NICKNAME_DB_MAX_BYTES):
+            break
+        included_lines.append(line)
+        total_chars += len(line)
+        total_bytes += line_bytes
+    return "".join(included_lines)
+
+
+def _has_matching_timeline_structure(original_text: str, corrected_text: str) -> bool:
+    original_lines = original_text.splitlines()
+    corrected_lines = corrected_text.splitlines()
+    if len(original_lines) != len(corrected_lines):
+        return False
+
+    timestamp_pattern = r"^\[(\d{2}:\d{2}:\d{2})\]"
+    for original_line, corrected_line in zip(original_lines, corrected_lines):
+        original_match = re.match(timestamp_pattern, original_line)
+        corrected_match = re.match(timestamp_pattern, corrected_line)
+        original_timestamp = original_match.group(1) if original_match else None
+        corrected_timestamp = corrected_match.group(1) if corrected_match else None
+        if original_timestamp != corrected_timestamp:
+            return False
+    return True
+
+
 def correct_streamer_nicknames_with_codex(timeline_text: str, codex_model: str = "", db_filename="chzzk_streamers.txt", prompt_snapshot=None) -> str:
     if prompt_snapshot is None:
         prompt_snapshot = PromptRegistry().snapshot()
@@ -2971,12 +3008,13 @@ def correct_streamer_nicknames_with_codex(timeline_text: str, codex_model: str =
         processed_lines.append(line_strip)
 
     intermediate_text = "\n".join(processed_lines)
+    nickname_db_prompt_text = _limit_nickname_db_prompt_text(streamers_db_content)
 
     system_instruction = DEFAULT_PROMPTS["nickname_review"]
     system_instruction = PromptRegistry.compose("nickname_review", "", prompt_snapshot)
 
     user_prompt = (
-        f"===[치지직 스트리머 마스터 DB (참고 사전)]===\n{streamers_db_content}\n\n"
+        f"===[치지직 스트리머 마스터 DB (참고 사전)]===\n{nickname_db_prompt_text}\n\n"
         f"===[교정 대상 타임라인 텍스트]===\n{intermediate_text}\n\n"
         "선택된 검수 지침과 출력 형식에 따라 타임라인을 검수하십시오."
     )
@@ -2994,6 +3032,10 @@ def correct_streamer_nicknames_with_codex(timeline_text: str, codex_model: str =
             model=codex_model,
         )
         if corrected_text:
+            if not _has_matching_timeline_structure(intermediate_text, corrected_text):
+                print("⚠️ [Codex 연산 실패] 교정 결과의 타임라인 구조가 변경되어 1차 구조 정리본을 반환합니다.")
+                return intermediate_text
+
             final_lines = []
             for line in corrected_text.split("\n"):
                 if line.strip().startswith("[") and ";" in line and line.strip().endswith("]"):
